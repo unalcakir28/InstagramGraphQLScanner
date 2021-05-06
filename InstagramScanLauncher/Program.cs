@@ -13,6 +13,16 @@ namespace InstagramScanLauncher
         static async Task Main(string[] args)
         {
             InstagramAPI.Functions instagramFunc = new InstagramAPI.Functions();
+            var posts = instagramFunc.GetPostsFromTag("test", 2);
+        }
+
+        static Dictionary<string, string> getCookies()
+        {
+            /* 
+             * Bazı fonksiyonları kullanmak için cookie istenecek. 
+             * Aşağıdaki yöntem ile cookie verisi alınıp fonksiyona gönderilebilir.
+             */
+
             ChromeDriver driver = new ChromeDriver();
             Thread.Sleep(1000);
             driver.Navigate().GoToUrl("https://www.instagram.com/accounts/login/");
@@ -27,8 +37,7 @@ namespace InstagramScanLauncher
             var driverCookies = driver.Manage().Cookies;
             var cookies = driverCookies.AllCookies.ToDictionary(w => w.Name, x => x.Value);
             driver.Close();
-
-            var posts = instagramFunc.GetPostsFromTag("test",2);
+            return cookies;
         }
     }
 }
