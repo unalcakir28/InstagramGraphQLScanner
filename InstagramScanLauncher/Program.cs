@@ -12,10 +12,18 @@ namespace InstagramScanLauncher
     {
         static async Task Main(string[] args)
         {
+            var cookies = getCookies();
             InstagramAPI.Functions instagramFunc = new InstagramAPI.Functions();
-            var posts = instagramFunc.GetPostsFromTag("test", 2);
+            var user = instagramFunc.GetUser("setup34digital", cookies);
+            var userPosts = instagramFunc.GetPostsFromUserId(user.Id, cookies, postPerPage: 20, pageCount: 2);
+            var postComments = instagramFunc.GetComments(userPosts[0].ShortCode, cookies, postPerPage: 20, pageCount: 3);
+            var tagPosts = instagramFunc.GetPostsFromTag("pazar", cookies, postPerPage: 10, pageCount: 3);
         }
 
+
+        /// <summary>
+        /// Selenium ile tarayıcıyı açarak instagram login istenir ve login sonrası tarayıcıyı kapatarak aktif cookie verilerini döner.
+        /// </summary>
         static Dictionary<string, string> getCookies()
         {
             /* 

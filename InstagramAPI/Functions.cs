@@ -16,11 +16,22 @@ namespace InstagramAPI
     {
         Random rnd = new Random();
 
-        public User GetUser(string userName)
+        /// <summary>
+        /// Kullanıcı adı ile instagram veritabanındaki public kullanıcı verilerini getirir.
+        /// </summary>
+        /// <param name="userName">Zorunludur. Verileri getirilecek kullanıcının instagram kullanıcı adı girilmelidir. https://www.instagram.com/X/ url'indeki X alanında yazan değerdir</param>
+        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
+        public User GetUser(string userName, Dictionary<string, string> cookies)
         {
             var client = new RestClient("https://www.instagram.com/" + userName + "/?__a=1");
             client.Timeout = -1;
             var request = new RestRequest(Method.GET);
+
+            cookies.ToList().ForEach(cookie =>
+            {
+                request.AddCookie(cookie.Key, cookie.Value);
+            });
+
             IRestResponse response = client.Execute(request);
             Thread.Sleep(rnd.Next(3000, 5000));
 
@@ -43,11 +54,25 @@ namespace InstagramAPI
             return user;
         }
 
-        public List<Post> GetPostsFromTag(string tag, int pageCount, string after = null)
+        /// <summary>
+        /// Hashtag altına yapılmış olan public paylaşımları getirir.
+        /// </summary>
+        /// <param name="tag">Zorunludur.</param>
+        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
+        /// <param name="after">Zorunlu değildir. Sayfalama için kullanılır.</param>
+        /// <param name="postPerPage">Zorunlu değildir. Default olarak 50 kullanılır ve maksimum 50 girilebilir. Her sayfada kaç post getirileceğini belirtir.</param>
+        /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
+        public List<Post> GetPostsFromTag(string tag, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
-            var client = new RestClient("https://www.instagram.com/graphql/query/?query_hash=9b498c08113f1e09617a1703c22b2f32&variables={\"tag_name\":\"" + tag + "\",\"first\":50,\"after\":\"" + after + "\"}");
+            var client = new RestClient("https://www.instagram.com/graphql/query/?query_hash=9b498c08113f1e09617a1703c22b2f32&variables={\"tag_name\":\"" + tag + "\",\"first\":" + postPerPage.ToString() + ",\"after\":\"" + after + "\"}");
             client.Timeout = -1;
             var request = new RestRequest(Method.GET);
+
+            cookies.ToList().ForEach(cookie =>
+            {
+                request.AddCookie(cookie.Key, cookie.Value);
+            });
+
             IRestResponse response = client.Execute(request);
             Thread.Sleep(rnd.Next(3000, 5000));
 
@@ -77,16 +102,30 @@ namespace InstagramAPI
             if (!has_next_page || pageCount == 1)
                 return posts;
 
-            var nextPosts = GetPostsFromTag(tag, --pageCount, end_cursor);
+            var nextPosts = GetPostsFromTag(tag, cookies, postPerPage: postPerPage, pageCount: --pageCount, after: end_cursor);
             posts.AddRange(nextPosts);
             return posts;
         }
 
-        public List<Post> GetPostsFromUserId(string userId, string after = null)
+        /// <summary>
+        /// Kullanıcının paylaştığı postları getirir.
+        /// </summary>
+        /// <param name="userId">Zorunludur. GetUser fonksiyonu yardımı ile userId bilgisi alınabilir.</param>
+        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
+        /// <param name="after">Zorunlu değildir. Sayfalama için kullanılır.</param>
+        /// <param name="postPerPage">Zorunlu değildir. Default olarak 50 kullanılır ve maksimum 50 girilebilir. Her sayfada kaç post getirileceğini belirtir.</param>
+        /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
+        public List<Post> GetPostsFromUserId(string userId, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
-            var client = new RestClient("https://www.instagram.com/graphql/query/?query_hash=003056d32c2554def87228bc3fd9668a&variables={\"id\":\"" + userId + "\",\"first\":50,\"after\":\"" + after + "\"}");
+            var client = new RestClient("https://www.instagram.com/graphql/query/?query_hash=003056d32c2554def87228bc3fd9668a&variables={\"id\":\"" + userId + "\",\"first\":" + postPerPage.ToString() + ",\"after\":\"" + after + "\"}");
             client.Timeout = -1;
             var request = new RestRequest(Method.GET);
+
+            cookies.ToList().ForEach(cookie =>
+            {
+                request.AddCookie(cookie.Key, cookie.Value);
+            });
+
             IRestResponse response = client.Execute(request);
             Thread.Sleep(rnd.Next(3000, 5000));
 
@@ -112,28 +151,33 @@ namespace InstagramAPI
             bool has_next_page = data.data.user.edge_owner_to_timeline_media.page_info.has_next_page;
             string end_cursor = data.data.user.edge_owner_to_timeline_media.page_info.end_cursor;
 
-            if (!has_next_page)
+            if (!has_next_page || pageCount == 1)
                 return posts;
 
-            var nextPosts = GetPostsFromUserId(userId, end_cursor);
+            var nextPosts = GetPostsFromUserId(userId, cookies, postPerPage: postPerPage, pageCount: --pageCount, after: end_cursor);
             posts.AddRange(nextPosts);
             return posts;
         }
 
-        public List<Comment> GetComments(string shortcode, string after = null, Dictionary<string, string> cookies = null)
+        /// <summary>
+        /// Post'un altına yapılan yorumları getirir.
+        /// </summary>
+        /// <param name="shortcode">Zorunludur. Instagram'ı tarayıcıda açtığınızda https://www.instagram.com/p/X/ url'indeki X alanında yazan değerdir.</param>
+        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
+        /// <param name="after">Zorunlu değildir. Sayfalama için kullanılır.</param>
+        /// <param name="postPerPage">Zorunlu değildir. Default olarak 50 kullanılır ve maksimum 50 girilebilir. Her sayfada kaç post getirileceğini belirtir.</param>
+        /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
+        public List<Comment> GetComments(string shortcode, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
-            var client = new RestClient("https://www.instagram.com/graphql/query/?query_hash=bc3296d1ce80a24b1b6e40b1e72903f5&variables={\"shortcode\":\"" + shortcode + "\",\"first\":50,\"after\":\"" + after?.Replace("\"", "%5C%22") + "\"}");
+            var client = new RestClient("https://www.instagram.com/graphql/query/?query_hash=bc3296d1ce80a24b1b6e40b1e72903f5&variables={\"shortcode\":\"" + shortcode + "\",\"first\":" + postPerPage.ToString() + ",\"after\":\"" + after?.Replace("\"", "%5C%22") + "\"}");
             client.Timeout = -1;
             client.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.182 Safari/537.36";
             var request = new RestRequest(Method.GET);
 
-            if (cookies != null)
+            cookies.ToList().ForEach(cookie =>
             {
-                cookies.ToList().ForEach(cookie =>
-                {
-                    request.AddCookie(cookie.Key, cookie.Value);
-                });
-            }
+                request.AddCookie(cookie.Key, cookie.Value);
+            });
 
             IRestResponse response = client.Execute(request);
 
@@ -158,10 +202,10 @@ namespace InstagramAPI
                 comments.Add(comment);
             }
 
-            if (!has_next_page)
+            if (!has_next_page || pageCount == 1)
                 return comments;
 
-            var nextComments = GetComments(shortcode, end_cursor, cookies);
+            var nextComments = GetComments(shortcode, cookies, postPerPage: postPerPage, pageCount: --pageCount, after: end_cursor);
             comments.AddRange(nextComments);
             return comments;
         }
