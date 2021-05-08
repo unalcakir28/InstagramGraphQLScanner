@@ -1,6 +1,6 @@
 # InstagramGraphQLScanner
 
-Instagram'ın public graphql api servisini kullanarak kullanıcı, post ve yorum verilerini alabilirsiniz. Yalnızca herkese açık profiller veya profili size açık olan profillerde çalışır. Private hesapların verilerini alamazsınız.
+Instagram'ın public graphql api servisini kullanarak kullanıcı, post ve yorum verilerini alabilirsiniz. Yalnızca herkese açık profiller veya size açık olan profillerde çalışır. Private hesapların verilerini alamazsınız.
 
 Bilgisayarda Google Chrome son sürüm yüklü ve projenin nuget paketleri içerisindeki Selenium kütüphanesinin güncel olması gerekiyor. Aksi halde hata alır.
 
