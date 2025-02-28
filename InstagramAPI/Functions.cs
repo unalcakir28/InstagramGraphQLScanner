@@ -10,22 +10,50 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace InstagramAPI
 {
+    /// <summary>
+    /// Instagram API işlemlerini yöneten ana sınıf
+    /// </summary>
     public class Functions
     {
-        Random rnd = new Random();
+        private readonly Random rnd = new Random();
+        private readonly string _logPrefix = "[InstagramAPI]";
+
+        /// <summary>
+        /// API isteklerinin durumunu loglayan yardımcı metot
+        /// </summary>
+        private void LogApiCall(string endpoint, System.Net.HttpStatusCode statusCode, string message)
+        {
+            var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            Debug.WriteLine($"{timestamp} {_logPrefix} [{endpoint}] Status: {statusCode} - {message}");
+            Console.WriteLine($"{_logPrefix} [{endpoint}] {message}");
+        }
 
         // Instagram API yanıtlarını temizleyen yardımcı metot
         private string CleanInstagramResponse(string response)
         {
-            // "for (;;);" veya diğer önekleri temizle
-            if (response.StartsWith("for (;;);"))
+            try
             {
-                response = response.Substring(9);
+                if (string.IsNullOrEmpty(response))
+                {
+                    throw new ArgumentNullException(nameof(response), "API yanıtı boş");
+                }
+
+                // "for (;;);" veya diğer önekleri temizle
+                if (response.StartsWith("for (;;);"))
+                {
+                    response = response.Substring(9);
+                }
+                return response;
             }
-            return response;
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"{_logPrefix} [CleanResponse] Hata: {ex.Message}");
+                throw new Exception("API yanıtı temizlenirken hata oluştu: " + ex.Message);
+            }
         }
 
         // Cookies içinden CSRF token'ı çıkaran yardımcı metot
@@ -51,7 +79,13 @@ namespace InstagramAPI
         /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
         public User GetUser(string userName, Dictionary<string, string> cookies)
         {
-            Console.WriteLine($"Kullanıcı verisi isteniyor: {userName}");
+            if (string.IsNullOrEmpty(userName))
+                throw new ArgumentNullException(nameof(userName));
+
+            if (cookies == null || !cookies.Any())
+                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
+
+            LogApiCall("GetUser", System.Net.HttpStatusCode.Processing, $"Kullanıcı verisi isteniyor: {userName}");
             
             // Son Instagram API değişikliklerinde farklı endpoint kullanılmaya başlandı
             var client = new RestClient($"https://www.instagram.com/api/v1/users/web_profile_info/?username={userName}");
@@ -70,52 +104,66 @@ namespace InstagramAPI
                 request.AddCookie(cookie.Key, cookie.Value);
             }
             
-            IRestResponse response = client.Execute(request);
-            Thread.Sleep(rnd.Next(3000, 5000));
+            try
+            {
+                // API isteği yapılıyor
+                IRestResponse response = client.Execute(request);
+                LogApiCall("GetUser", response.StatusCode, $"API yanıtı alındı ({response.StatusCode})");
 
-            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                throw new Exception("Kullanıcı bulunamadı.");
+                Thread.Sleep(rnd.Next(3000, 5000));
 
-            // Hata yakalama ve debug için yanıtı kontrol et
-            Console.WriteLine("API Yanıt Kodu: " + response.StatusCode);
-            Console.WriteLine("API Yanıt Başlıkları: " + string.Join(", ", response.Headers.Select(h => $"{h.Name}: {h.Value}")));
-            
-            try {
-                var cleanedResponse = CleanInstagramResponse(response.Content);
-                Console.WriteLine("Temizlenmiş API Yanıtı: " + cleanedResponse);
-                
-                dynamic data = JObject.Parse(cleanedResponse);
-                
-                // Yeni API yanıt yapısı, farklı bir JSON şemasına sahip
-                var userData = data.data.user;
-                
-                if (userData == null)
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    throw new Exception("Kullanıcı bilgileri alınamadı. Instagram oturumu geçersiz olabilir.");
+                    LogApiCall("GetUser", response.StatusCode, $"Kullanıcı bulunamadı: {userName}");
+                    throw new Exception($"Kullanıcı bulunamadı: {userName}");
                 }
+
+                // Hata yakalama ve debug için yanıtı kontrol et
+                Console.WriteLine("API Yanıt Kodu: " + response.StatusCode);
+                Console.WriteLine("API Yanıt Başlıkları: " + string.Join(", ", response.Headers.Select(h => $"{h.Name}: {h.Value}")));
                 
-                var user = new User();
-                user.Id = userData.id;
-                user.UserName = userData.username;
-                user.FullName = userData.full_name;
-                user.Biography = userData.biography;
-                user.ProfilePicture = userData.profile_pic_url;
-                user.ProfilePictureHD = userData.profile_pic_url_hd ?? userData.profile_pic_url;
-                user.FollowerCount = userData.edge_followed_by.count;
-                user.FollowCount = userData.edge_follow.count;
-                user.PostCount = userData.edge_owner_to_timeline_media.count;
-                return user;
+                try {
+                    var cleanedResponse = CleanInstagramResponse(response.Content);
+                    Console.WriteLine("Temizlenmiş API Yanıtı: " + cleanedResponse);
+                    
+                    dynamic data = JObject.Parse(cleanedResponse);
+                    
+                    // Yeni API yanıt yapısı, farklı bir JSON şemasına sahip
+                    var userData = data.data.user;
+                    
+                    if (userData == null)
+                    {
+                        throw new Exception("Kullanıcı bilgileri alınamadı. Instagram oturumu geçersiz olabilir.");
+                    }
+                    
+                    var user = new User();
+                    user.Id = userData.id;
+                    user.UserName = userData.username;
+                    user.FullName = userData.full_name;
+                    user.Biography = userData.biography;
+                    user.ProfilePicture = userData.profile_pic_url;
+                    user.ProfilePictureHD = userData.profile_pic_url_hd ?? userData.profile_pic_url;
+                    user.FollowerCount = userData.edge_followed_by.count;
+                    user.FollowCount = userData.edge_follow.count;
+                    user.PostCount = userData.edge_owner_to_timeline_media.count;
+                    return user;
+                }
+                catch (Exception ex) {
+                    Console.WriteLine("JSON ayrıştırma hatası: " + ex.Message);
+                    
+                    // Yeniden oturum açmanın gerekli olduğunu belirten bir hata fırlat
+                    if (response.Content.Contains("errorSummary") && response.Content.Contains("Please try closing and re-opening your browser window"))
+                    {
+                        throw new Exception("Instagram oturumu geçersiz. Lütfen tarayıcıyı kapatıp açarak yeniden oturum açın.");
+                    }
+                    
+                    throw new Exception("Instagram API yanıtı ayrıştırılamadı. Instagram API yapısı değişmiş olabilir: " + ex.Message);
+                }
             }
-            catch (Exception ex) {
-                Console.WriteLine("JSON ayrıştırma hatası: " + ex.Message);
-                
-                // Yeniden oturum açmanın gerekli olduğunu belirten bir hata fırlat
-                if (response.Content.Contains("errorSummary") && response.Content.Contains("Please try closing and re-opening your browser window"))
-                {
-                    throw new Exception("Instagram oturumu geçersiz. Lütfen tarayıcıyı kapatıp açarak yeniden oturum açın.");
-                }
-                
-                throw new Exception("Instagram API yanıtı ayrıştırılamadı. Instagram API yapısı değişmiş olabilir: " + ex.Message);
+            catch (Exception ex)
+            {
+                LogApiCall("GetUser", System.Net.HttpStatusCode.InternalServerError, $"Hata: {ex.Message}");
+                throw;
             }
         }
 
@@ -129,6 +177,14 @@ namespace InstagramAPI
         /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
         public List<Post> GetPostsFromTag(string tag, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
+            if (string.IsNullOrEmpty(tag))
+                throw new ArgumentNullException(nameof(tag));
+
+            if (cookies == null || !cookies.Any())
+                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
+
+            LogApiCall("GetPostsFromTag", System.Net.HttpStatusCode.Processing, $"Hashtag postları isteniyor: #{tag}, Sayfa: {pageCount}");
+            
             Console.WriteLine($"Hashtag postları isteniyor: {tag}, Sayfa: {pageCount}");
             
             try
@@ -411,6 +467,14 @@ namespace InstagramAPI
         /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
         public List<Post> GetPostsFromUserId(string userId, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
+            if (string.IsNullOrEmpty(userId))
+                throw new ArgumentNullException(nameof(userId));
+
+            if (cookies == null || !cookies.Any())
+                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
+
+            LogApiCall("GetPostsFromUserId", System.Net.HttpStatusCode.Processing, $"Kullanıcı postları isteniyor: {userId}, Sayfa: {pageCount}");
+
             Console.WriteLine($"Kullanıcı postları isteniyor: {userId}, Sayfa: {pageCount}");
             
             // Güncel Instagram kullanıcı medya API endpoint'i
@@ -521,6 +585,14 @@ namespace InstagramAPI
         /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
         public List<Comment> GetComments(string shortcode, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
+            if (string.IsNullOrEmpty(shortcode))
+                throw new ArgumentNullException(nameof(shortcode));
+
+            if (cookies == null || !cookies.Any())
+                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
+
+            LogApiCall("GetComments", System.Net.HttpStatusCode.Processing, $"Post yorumları isteniyor: {shortcode}, Sayfa: {pageCount}");
+
             Console.WriteLine($"Post yorumları isteniyor: {shortcode}, Sayfa: {pageCount}");
             var comments = new List<Comment>();
             
