@@ -3,7 +3,8 @@ using InstagramAPI.Logging;
 using InstagramAPI.Exceptions;
 using InstagramAPI.Configuration;
 using InstagramAPI.Services;
-using Newtonsoft.Json.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using RestSharp;
 using System;
 using System.Collections.Generic;
@@ -20,6 +21,15 @@ namespace InstagramAPI
         private readonly Random _rnd = new Random();
         private readonly ILogger _logger;
         private readonly InstagramApiConfig _config;
+
+        // JsonSerializerOptions yapılandırması
+        private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
+        };
 
         public Functions(ILogger logger = null, InstagramApiConfig config = null)
         {
@@ -143,28 +153,30 @@ namespace InstagramAPI
                     var cleanedResponse = CleanInstagramResponse(response.Content);
                     _logger.LogDebug($"API Yanıtı: {cleanedResponse}");
 
-                    dynamic data = JObject.Parse(cleanedResponse);
-                    var userData = data.data.user;
+                    using var jsonDoc = JsonDocument.Parse(cleanedResponse);
+                    var root = jsonDoc.RootElement;
 
-                    if (userData == null)
+                    var userData = root.GetProperty("data").GetProperty("user");
+                    if (userData.ValueKind == JsonValueKind.Null)
                     {
                         throw new InstagramAuthException("Kullanıcı bilgileri alınamadı. Instagram oturumu geçersiz olabilir.");
                     }
 
                     return new User
                     {
-                        Id = userData.id,
-                        UserName = userData.username,
-                        FullName = userData.full_name,
-                        Biography = userData.biography,
-                        ProfilePicture = userData.profile_pic_url,
-                        ProfilePictureHD = userData.profile_pic_url_hd ?? userData.profile_pic_url,
-                        FollowerCount = userData.edge_followed_by.count,
-                        FollowCount = userData.edge_follow.count,
-                        PostCount = userData.edge_owner_to_timeline_media.count
+                        Id = userData.GetProperty("id").GetString(),
+                        UserName = userData.GetProperty("username").GetString(),
+                        FullName = userData.GetProperty("full_name").GetString(),
+                        Biography = userData.TryGetProperty("biography", out var bio) ? bio.GetString() : "",
+                        ProfilePicture = userData.GetProperty("profile_pic_url").GetString(),
+                        ProfilePictureHD = userData.TryGetProperty("profile_pic_url_hd", out var hdPic) ? 
+                            hdPic.GetString() : userData.GetProperty("profile_pic_url").GetString(),
+                        FollowerCount = userData.GetProperty("edge_followed_by").GetProperty("count").GetInt32(),
+                        FollowCount = userData.GetProperty("edge_follow").GetProperty("count").GetInt32(),
+                        PostCount = userData.GetProperty("edge_owner_to_timeline_media").GetProperty("count").GetInt32()
                     };
                 }
-                catch (Exception ex)
+                catch (JsonException ex)
                 {
                     _logger.LogError("JSON ayrıştırma hatası", ex);
                     if (response.Content.Contains("Please try closing and re-opening your browser window"))
@@ -172,6 +184,11 @@ namespace InstagramAPI
                         throw new InstagramAuthException("Instagram oturumu geçersiz. Lütfen tarayıcıyı kapatıp açarak yeniden oturum açın.");
                     }
                     throw new InstagramApiException("Instagram API yanıtı ayrıştırılamadı", ex);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError("Kullanıcı verisi işlenirken hata", ex);
+                    throw new InstagramApiException("Instagram API yanıtı işlenirken hata oluştu", ex);
                 }
             }, "GetUser");
         }
@@ -223,21 +240,28 @@ namespace InstagramAPI
                     if (exploreResponse.StatusCode == HttpStatusCode.OK)
                     {
                         var cleanedExploreResponse = CleanInstagramResponse(exploreResponse.Content);
-                        dynamic exploreData = JObject.Parse(cleanedExploreResponse);
+                        using var jsonDoc = JsonDocument.Parse(cleanedExploreResponse);
+                        var root = jsonDoc.RootElement;
                         
                         _logger.LogInfo("Keşfet API'sinden rastgele postlar alınıyor...");
                         
-                        if (exploreData.sectional_items != null)
+                        if (root.TryGetProperty("sectional_items", out var sectionalItems) && 
+                            sectionalItems.ValueKind == JsonValueKind.Array)
                         {
-                            foreach (var section in exploreData.sectional_items)
+                            foreach (var section in sectionalItems.EnumerateArray())
                             {
-                                if (section.layout_content?.medias != null)
+                                if (section.TryGetProperty("layout_content", out var layoutContent) && 
+                                    layoutContent.TryGetProperty("medias", out var medias) &&
+                                    medias.ValueKind == JsonValueKind.Array)
                                 {
-                                    foreach (var mediaItem in section.layout_content.medias)
+                                    foreach (var mediaItem in medias.EnumerateArray())
                                     {
                                         try
                                         {
-                                            posts.Add(ConvertToPost(mediaItem.media));
+                                            if (mediaItem.TryGetProperty("media", out var media))
+                                            {
+                                                posts.Add(ConvertToPost(media));
+                                            }
                                         }
                                         catch (Exception ex)
                                         {
@@ -263,18 +287,23 @@ namespace InstagramAPI
                     var cleanedResponse = CleanInstagramResponse(response.Content);
                     _logger.LogDebug($"Hashtag API yanıt özeti: {cleanedResponse.Substring(0, Math.Min(100, cleanedResponse.Length))}");
                     
-                    dynamic data = JObject.Parse(cleanedResponse);
+                    using var jsonDoc = JsonDocument.Parse(cleanedResponse);
+                    var root = jsonDoc.RootElement;
                     
-                    if (data.status != "ok")
+                    if (!root.TryGetProperty("status", out var status) || status.GetString() != "ok")
                     {
-                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + data.message);
+                        var message = root.TryGetProperty("message", out var msg) ? msg.GetString() : "Bilinmeyen hata";
+                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + message);
                     }
                     
-                    if (data.data != null)
+                    if (root.TryGetProperty("data", out var data))
                     {
                         // Öne çıkan ve son postları işle
-                        ProcessMediaNodes(posts, data.data.top?.sections);
-                        ProcessMediaNodes(posts, data.data.recent?.sections);
+                        ProcessMediaNodes(posts, data.TryGetProperty("top", out var top) ? 
+                            top.TryGetProperty("sections", out var topSections) ? topSections : default : default);
+                            
+                        ProcessMediaNodes(posts, data.TryGetProperty("recent", out var recent) ? 
+                            recent.TryGetProperty("sections", out var recentSections) ? recentSections : default : default);
                     }
                     
                     // HTML içinden veri çıkarma denemesi
@@ -285,14 +314,22 @@ namespace InstagramAPI
                         var match = Regex.Match(tagResponse.Content, @"<script type=""application/json"" data-sj>(.*?)</script>");
                         if (match.Success)
                         {
-                            dynamic htmlData = JObject.Parse(match.Groups[1].Value);
-                            if (htmlData.hashtag?.edge_hashtag_to_media?.edges != null)
+                            using var htmlJsonDoc = JsonDocument.Parse(match.Groups[1].Value);
+                            var htmlRoot = htmlJsonDoc.RootElement;
+                            
+                            if (htmlRoot.TryGetProperty("hashtag", out var hashtag) && 
+                                hashtag.TryGetProperty("edge_hashtag_to_media", out var edgeHashtag) &&
+                                edgeHashtag.TryGetProperty("edges", out var edges) &&
+                                edges.ValueKind == JsonValueKind.Array)
                             {
-                                foreach (var edge in htmlData.hashtag.edge_hashtag_to_media.edges)
+                                foreach (var edge in edges.EnumerateArray())
                                 {
                                     try
                                     {
-                                        posts.Add(ConvertToPost(edge.node));
+                                        if (edge.TryGetProperty("node", out var node))
+                                        {
+                                            posts.Add(ConvertToPost(node));
+                                        }
                                     }
                                     catch (Exception ex)
                                     {
@@ -306,6 +343,11 @@ namespace InstagramAPI
                     _logger.LogInfo($"Toplam {posts.Count} post bulundu");
                     return posts;
                 }
+                catch (JsonException ex)
+                {
+                    _logger.LogError("JSON ayrıştırma hatası", ex);
+                    throw new InstagramApiException("Instagram hashtag API yanıtı ayrıştırılamadı", ex);
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError("Hashtag verisi işlenirken hata", ex);
@@ -314,16 +356,18 @@ namespace InstagramAPI
             }, "GetPostsFromTag");
         }
 
-        private void ProcessMediaNodes(List<Post> posts, dynamic sections)
+        private void ProcessMediaNodes(List<Post> posts, JsonElement sections)
         {
-            if (sections == null) return;
+            if (sections.ValueKind != JsonValueKind.Array) return;
 
-            foreach (var section in sections)
+            foreach (var section in sections.EnumerateArray())
             {
                 try
                 {
-                    var mediaNode = section.media;
-                    posts.Add(ConvertToPost(mediaNode));
+                    if (section.TryGetProperty("media", out var mediaNode))
+                    {
+                        posts.Add(ConvertToPost(mediaNode));
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -332,21 +376,45 @@ namespace InstagramAPI
             }
         }
 
-        private Post ConvertToPost(dynamic node)
+        private Post ConvertToPost(JsonElement node)
         {
             var post = new Post
             {
-                Id = node.id,
-                ShortCode = node.code ?? node.shortcode,
-                Caption = node.caption?.text ?? "",
-                isVideo = node.is_video ?? (node.media_type == 2),
-                Picture = node.display_url ?? node.image_versions2?.candidates[0]?.url,
-                Thumbnail = node.thumbnail_src ?? node.image_versions2?.candidates[1]?.url ?? node.image_versions2?.candidates[0]?.url,
-                CommentCount = node.comment_count ?? node.edge_media_to_comment?.count ?? 0,
-                LikeCount = node.like_count ?? node.edge_liked_by?.count ?? 0,
-                Date = Tools.UnixTimeStampToDateTime((double)(node.taken_at ?? node.taken_at_timestamp)),
+                Id = node.TryGetProperty("id", out var id) ? id.GetString() : "",
+                ShortCode = node.TryGetProperty("code", out var code) ? code.GetString() : 
+                            node.TryGetProperty("shortcode", out var shortcode) ? shortcode.GetString() : "",
+                Caption = node.TryGetProperty("caption", out var caption) ? 
+                          (caption.TryGetProperty("text", out var text) ? text.GetString() : "") : "",
+                isVideo = node.TryGetProperty("is_video", out var isVideo) ? isVideo.GetBoolean() : 
+                          node.TryGetProperty("media_type", out var mediaType) ? (mediaType.GetInt32() == 2) : false,
+                Picture = node.TryGetProperty("display_url", out var displayUrl) ? displayUrl.GetString() : 
+                          node.TryGetProperty("image_versions2", out var imageVer) ? 
+                          (imageVer.TryGetProperty("candidates", out var candidates) ? 
+                          (candidates.ValueKind == JsonValueKind.Array && candidates.GetArrayLength() > 0 ? 
+                          candidates[0].TryGetProperty("url", out var url) ? url.GetString() : "" : "") : "") : "",
+                Thumbnail = node.TryGetProperty("thumbnail_src", out var thumbSrc) ? thumbSrc.GetString() : 
+                            node.TryGetProperty("image_versions2", out var imgVer) ? 
+                            (imgVer.TryGetProperty("candidates", out var cands) ? 
+                            (cands.ValueKind == JsonValueKind.Array && cands.GetArrayLength() > 1 ? 
+                            cands[1].TryGetProperty("url", out var url2) ? url2.GetString() : 
+                            (cands.GetArrayLength() > 0 ? cands[0].TryGetProperty("url", out var url3) ? 
+                            url3.GetString() : "" : "") : "") : "") : "",
+                CommentCount = node.TryGetProperty("comment_count", out var commentCount) ? commentCount.GetInt32() : 
+                               node.TryGetProperty("edge_media_to_comment", out var edgeComment) ? 
+                               edgeComment.TryGetProperty("count", out var count1) ? count1.GetInt32() : 0 : 0,
+                LikeCount = node.TryGetProperty("like_count", out var likeCount) ? likeCount.GetInt32() : 
+                            node.TryGetProperty("edge_liked_by", out var edgeLike) ? 
+                            edgeLike.TryGetProperty("count", out var count2) ? count2.GetInt32() : 0 : 0
             };
-            
+
+            // Unix zaman damgasını işleme
+            if (node.TryGetProperty("taken_at", out var takenAt))
+                post.Date = Tools.UnixTimeStampToDateTime((double)takenAt.GetInt64());
+            else if (node.TryGetProperty("taken_at_timestamp", out var timestamp))
+                post.Date = Tools.UnixTimeStampToDateTime((double)timestamp.GetInt64());
+            else
+                post.Date = DateTime.Now;
+
             post.PostUrl = $"https://www.instagram.com/p/{post.ShortCode}";
             return post;
         }
@@ -386,17 +454,19 @@ namespace InstagramAPI
                     var cleanedResponse = CleanInstagramResponse(response.Content);
                     _logger.LogDebug($"Kullanıcı postları API yanıt özeti: {cleanedResponse.Substring(0, Math.Min(100, cleanedResponse.Length))}");
 
-                    dynamic data = JObject.Parse(cleanedResponse);
+                    using var jsonDoc = JsonDocument.Parse(cleanedResponse);
+                    var root = jsonDoc.RootElement;
 
-                    if (data.status != "ok")
+                    if (!root.TryGetProperty("status", out var status) || status.GetString() != "ok")
                     {
-                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + data.message);
+                        var message = root.TryGetProperty("message", out var msg) ? msg.GetString() : "Bilinmeyen hata";
+                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + message);
                     }
 
                     var posts = new List<Post>();
-                    if (data.items != null)
+                    if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
                     {
-                        foreach (var item in data.items)
+                        foreach (var item in items.EnumerateArray())
                         {
                             try
                             {
@@ -410,8 +480,8 @@ namespace InstagramAPI
                     }
 
                     // Sayfalama kontrolü
-                    bool hasNextPage = data.more_available == true;
-                    string nextCursor = data.next_max_id?.ToString();
+                    bool hasNextPage = root.TryGetProperty("more_available", out var moreAvailable) && moreAvailable.GetBoolean();
+                    string nextCursor = root.TryGetProperty("next_max_id", out var nextMaxId) ? nextMaxId.GetString() : null;
 
                     if (hasNextPage && !string.IsNullOrEmpty(nextCursor) && pageCount > 1)
                     {
@@ -422,6 +492,11 @@ namespace InstagramAPI
 
                     _logger.LogInfo($"Toplam {posts.Count} post bulundu");
                     return posts;
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogError("JSON ayrıştırma hatası", ex);
+                    throw new InstagramApiException("Instagram kullanıcı postları API yanıtı ayrıştırılamadı", ex);
                 }
                 catch (Exception ex)
                 {
@@ -488,27 +563,29 @@ namespace InstagramAPI
                 try
                 {
                     var cleanedResponse = CleanInstagramResponse(commentsResponse.Content);
-                    dynamic data = JObject.Parse(cleanedResponse);
+                    using var jsonDoc = JsonDocument.Parse(cleanedResponse);
+                    var root = jsonDoc.RootElement;
 
-                    if (data.status != "ok")
+                    if (!root.TryGetProperty("status", out var status) || status.GetString() != "ok")
                     {
-                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + data.message);
+                        var message = root.TryGetProperty("message", out var msg) ? msg.GetString() : "Bilinmeyen hata";
+                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + message);
                     }
 
                     // Yorumları işle
-                    if (data.comments != null)
+                    if (root.TryGetProperty("comments", out var commentsArray) && commentsArray.ValueKind == JsonValueKind.Array)
                     {
-                        foreach (var commentItem in data.comments)
+                        foreach (var commentItem in commentsArray.EnumerateArray())
                         {
                             try
                             {
                                 comments.Add(new Comment
                                 {
-                                    Id = commentItem.pk,
-                                    Text = commentItem.text,
-                                    Date = Tools.UnixTimeStampToDateTime((double)commentItem.created_at),
-                                    OwnerName = commentItem.user.username,
-                                    OwnerPicture = commentItem.user.profile_pic_url
+                                    Id = commentItem.GetProperty("pk").GetString(),
+                                    Text = commentItem.GetProperty("text").GetString(),
+                                    Date = Tools.UnixTimeStampToDateTime(commentItem.GetProperty("created_at").GetDouble()),
+                                    OwnerName = commentItem.GetProperty("user").GetProperty("username").GetString(),
+                                    OwnerPicture = commentItem.GetProperty("user").GetProperty("profile_pic_url").GetString()
                                 });
                             }
                             catch (Exception ex)
@@ -532,8 +609,8 @@ namespace InstagramAPI
                     }
 
                     // Sayfalama kontrolü
-                    bool hasNextPage = data.has_more_comments == true;
-                    string nextCursor = data.next_min_id?.ToString();
+                    bool hasNextPage = root.TryGetProperty("has_more_comments", out var hasMoreComments) && hasMoreComments.GetBoolean();
+                    string nextCursor = root.TryGetProperty("next_min_id", out var nextMinId) ? nextMinId.GetString() : null;
 
                     if (hasNextPage && !string.IsNullOrEmpty(nextCursor) && pageCount > 1)
                     {
@@ -544,6 +621,11 @@ namespace InstagramAPI
 
                     _logger.LogInfo($"Toplam {comments.Count} yorum bulundu");
                     return comments;
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogError("JSON ayrıştırma hatası", ex);
+                    throw new InstagramApiException("Instagram yorumlar API yanıtı ayrıştırılamadı", ex);
                 }
                 catch (Exception ex)
                 {
@@ -569,12 +651,13 @@ namespace InstagramAPI
                 var sharedDataMatch = Regex.Match(content, @"window\._sharedData\s*=\s*({.+?});</script>");
                 if (sharedDataMatch.Success)
                 {
-                    dynamic sharedData = JObject.Parse(sharedDataMatch.Groups[1].Value);
-                    var mediaId = sharedData.entry_data?.PostPage[0]?.graphql?.shortcode_media?.id;
-                    if (!string.IsNullOrEmpty(mediaId?.ToString()))
+                    using var jsonDoc = JsonDocument.Parse(sharedDataMatch.Groups[1].Value);
+                    var root = jsonDoc.RootElement;
+                    var mediaId = root.GetProperty("entry_data").GetProperty("PostPage")[0].GetProperty("graphql").GetProperty("shortcode_media").GetProperty("id").GetString();
+                    if (!string.IsNullOrEmpty(mediaId))
                     {
                         _logger.LogDebug($"Media ID SharedData'dan bulundu: {mediaId}");
-                        return mediaId.ToString();
+                        return mediaId;
                     }
                 }
 
@@ -582,12 +665,13 @@ namespace InstagramAPI
                 var appDataMatch = Regex.Match(content, @"<script type=""application/json"" data-sj>(.*?)</script>");
                 if (appDataMatch.Success)
                 {
-                    dynamic appData = JObject.Parse(appDataMatch.Groups[1].Value);
-                    var mediaId = appData.items?[0]?.id;
-                    if (!string.IsNullOrEmpty(mediaId?.ToString()))
+                    using var jsonDoc = JsonDocument.Parse(appDataMatch.Groups[1].Value);
+                    var root = jsonDoc.RootElement;
+                    var mediaId = root.GetProperty("items")[0].GetProperty("id").GetString();
+                    if (!string.IsNullOrEmpty(mediaId))
                     {
                         _logger.LogDebug($"Media ID AppData'dan bulundu: {mediaId}");
-                        return mediaId.ToString();
+                        return mediaId;
                     }
                 }
 

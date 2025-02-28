@@ -1,14 +1,17 @@
-﻿using OpenQA.Selenium.Chrome;
+﻿using Microsoft.Extensions.Configuration;
+using OpenQA.Selenium.Chrome;
+using Serilog;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using InstagramAPI.Logging;
+using InstagramAPI.Configuration;
 using InstagramAPI.Models;
-using System.IO;
-using Newtonsoft.Json;
-using System.Diagnostics;
 
 namespace InstagramScanLauncher
 {
@@ -16,20 +19,22 @@ namespace InstagramScanLauncher
     {
         private static Dictionary<string, string> _cookies;
         private static InstagramAPI.Functions _instagramFunc;
-        private static readonly string LogFilePath = "instagram_scanner.log";
-        
+        private static readonly string LogFolderPath = "logs";
+        private static readonly string CookiePath = "instagram_cookies.json";
+        private static InstagramAPI.Logging.ILogger _logger;
+        private static IConfiguration _configuration;
+
         static async Task Main(string[] args)
         {
-            AppDomain.CurrentDomain.UnhandledException += (sender, e) => 
-            {
-                LogError("Kritik Hata", e.ExceptionObject as Exception);
-            };
-
             try
             {
-                WriteLog("========================================");
-                WriteLog("Instagram GraphQL Scanner - v1.0 Başlatıldı");
-                WriteLog("========================================");
+                // Yapılandırma ve loglama ayarlarını yükle
+                InitializeConfiguration();
+                InitializeLogging();
+
+                _logger.LogInfo("========================================");
+                _logger.LogInfo("Instagram GraphQL Scanner - v1.0 Başlatıldı");
+                _logger.LogInfo("========================================");
                 
                 Console.WriteLine("========================================");
                 Console.WriteLine("Instagram GraphQL Scanner - v1.0");
@@ -43,7 +48,11 @@ namespace InstagramScanLauncher
             }
             catch (Exception ex)
             {
-                LogError("Program Hatası", ex);
+                if (_logger != null)
+                    _logger.LogError("Program Hatası", ex);
+                else
+                    Console.Error.WriteLine($"Kritik hata: {ex.Message}\n{ex.StackTrace}");
+                    
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"\nUYGULAMA HATASI: {ex.Message}");
                 Console.WriteLine("Detaylı hata bilgisi log dosyasına kaydedildi.");
@@ -54,40 +63,34 @@ namespace InstagramScanLauncher
         }
 
         /// <summary>
-        /// Uygulama loglarını dosyaya yazar
+        /// Yapılandırma dosyasını yükler
         /// </summary>
-        private static void WriteLog(string message, bool isError = false)
+        private static void InitializeConfiguration()
         {
-            var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            var logMessage = $"{timestamp} - {message}";
-            
-            try
-            {
-                File.AppendAllText(LogFilePath, logMessage + Environment.NewLine);
-                Debug.WriteLine(logMessage);
-            }
-            catch { /* Log yazma hatalarını görmezden gel */ }
+            _configuration = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                .Build();
         }
 
         /// <summary>
-        /// Hata detaylarını log dosyasına yazar
+        /// Serilog yapılandırmasını yükler ve loglama altyapısını başlatır
         /// </summary>
-        private static void LogError(string context, Exception ex)
+        private static void InitializeLogging()
         {
-            if (ex == null) return;
+            // Logs klasörünü oluştur
+            if (!Directory.Exists(LogFolderPath))
+                Directory.CreateDirectory(LogFolderPath);
 
-            var sb = new StringBuilder();
-            sb.AppendLine($"[HATA] {context}");
-            sb.AppendLine($"Hata Mesajı: {ex.Message}");
-            sb.AppendLine($"Stack Trace: {ex.StackTrace}");
+            // Serilog yapılandırması
+            LoggingConfig.ConfigureLogging();
+            _logger = LoggingConfig.CreateLogger();
             
-            if (ex.InnerException != null)
+            // Kritik hatalar için global hata yakalama
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) => 
             {
-                sb.AppendLine($"İç Hata: {ex.InnerException.Message}");
-                sb.AppendLine($"İç Hata Stack Trace: {ex.InnerException.StackTrace}");
-            }
-            
-            WriteLog(sb.ToString(), true);
+                _logger?.LogError("Kritik Hata", e.ExceptionObject as Exception);
+            };
         }
 
         /// <summary>
@@ -100,19 +103,20 @@ namespace InstagramScanLauncher
             Console.WriteLine("Giriş yaptıktan sonra tarayıcı otomatik olarak kapanacak.");
             
             // Cookie var mı, varsa yükle
-            string cookiePath = "instagram_cookies.json";
-            
-            if (File.Exists(cookiePath))
+            if (File.Exists(CookiePath))
             {
                 try
                 {
                     Console.WriteLine("Kaydedilmiş oturum bilgisi bulundu. Yüklenmeye çalışılıyor...");
-                    string jsonCookies = File.ReadAllText(cookiePath);
-                    _cookies = JsonConvert.DeserializeObject<Dictionary<string, string>>(jsonCookies);
+                    string jsonCookies = File.ReadAllText(CookiePath);
+                    _cookies = JsonSerializer.Deserialize<Dictionary<string, string>>(jsonCookies);
                     
                     // Oturum bilgisi geçerli mi test et
                     Console.WriteLine("Oturum bilgisi test ediliyor...");
-                    _instagramFunc = new InstagramAPI.Functions();
+                    
+                    // API yapılandırmasını yükle
+                    var apiConfig = InstagramApiConfig.LoadFromConfiguration();
+                    _instagramFunc = new InstagramAPI.Functions(_logger, apiConfig);
                     
                     // Test için istekle sayfa yükle
                     var testUrl = "https://www.instagram.com/";
@@ -131,7 +135,7 @@ namespace InstagramScanLauncher
                     {
                         Console.WriteLine("Kaydedilmiş oturum süresi dolmuş. Yeniden giriş yapmanız gerekiyor.");
                         _cookies = GetCookies();
-                        SaveCookies(_cookies, cookiePath);
+                        SaveCookies(_cookies);
                     }
                     else
                     {
@@ -140,22 +144,27 @@ namespace InstagramScanLauncher
                 }
                 catch (Exception ex)
                 {
+                    _logger.LogError($"Kaydedilmiş oturum bilgisi yüklenemedi: {ex.Message}", ex);
                     Console.WriteLine($"Kaydedilmiş oturum bilgisi yüklenemedi: {ex.Message}");
                     Console.WriteLine("Yeniden giriş yapılacak...");
                     _cookies = GetCookies();
-                    SaveCookies(_cookies, cookiePath);
+                    SaveCookies(_cookies);
                 }
             }
             else
             {
                 _cookies = GetCookies();
-                SaveCookies(_cookies, cookiePath);
+                SaveCookies(_cookies);
             }
             
-            _instagramFunc = new InstagramAPI.Functions();
+            // API yapılandırmasını yükle
+            var config = InstagramApiConfig.LoadFromConfiguration();
+            _instagramFunc = new InstagramAPI.Functions(_logger, config);
+            
+            _logger.LogInfo($"Oturum başarıyla açıldı. {_cookies.Count} cookie bulunuyor.");
             Console.WriteLine($"Oturum başarıyla açıldı. {_cookies.Count} cookie bulunuyor.");
         }
-
+        
         /// <summary>
         /// Ana menüyü çalıştırır ve kullanıcı arayüzünü gösterir
         /// </summary>
@@ -181,7 +190,7 @@ namespace InstagramScanLauncher
                     Console.Write("Seçiminiz: ");
                     
                     string choice = Console.ReadLine();
-                    WriteLog($"Menü seçimi: {choice}");
+                    _logger.LogInfo($"Menü seçimi: {choice}");
                     
                     switch (choice)
                     {
@@ -202,7 +211,7 @@ namespace InstagramScanLauncher
                             break;
                         case "0":
                             exit = true;
-                            WriteLog("Program sonlandırılıyor...");
+                            _logger.LogInfo("Program sonlandırılıyor...");
                             break;
                         default:
                             Console.WriteLine("\nGeçersiz seçim. Tekrar deneyin.");
@@ -218,7 +227,7 @@ namespace InstagramScanLauncher
                 }
                 catch (Exception ex)
                 {
-                    LogError("Menü İşlemi", ex);
+                    _logger.LogError("Menü İşlemi", ex);
                     Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine($"\nHata oluştu: {ex.Message}");
                     Console.ResetColor();
@@ -227,7 +236,7 @@ namespace InstagramScanLauncher
                 }
             }
         }
-
+        
         /// <summary>
         /// Log dosyasının içeriğini gösterir
         /// </summary>
@@ -235,18 +244,32 @@ namespace InstagramScanLauncher
         {
             try
             {
-                if (File.Exists(LogFilePath))
+                var logFiles = Directory.GetFiles(LogFolderPath, "*.log");
+                
+                if (logFiles.Length > 0)
                 {
+                    // En son güncellenen log dosyasını al
+                    var latestLogFile = logFiles
+                        .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                        .First();
+                    
                     Console.Clear();
-                    Console.WriteLine("\n=== Log Dosyası İçeriği ===\n");
-                    string[] logs = File.ReadAllLines(LogFilePath);
+                    Console.WriteLine($"\n=== Log Dosyası İçeriği ({Path.GetFileName(latestLogFile)}) ===\n");
+                    
+                    string[] logs = File.ReadAllLines(latestLogFile);
                     
                     // Son 50 log satırını göster
                     foreach (var log in logs.Skip(Math.Max(0, logs.Length - 50)))
                     {
-                        if (log.Contains("[HATA]"))
+                        if (log.Contains("ERROR") || log.Contains("[Error]"))
                         {
                             Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine(log);
+                            Console.ResetColor();
+                        }
+                        else if (log.Contains("WARNING") || log.Contains("[Warning]"))
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
                             Console.WriteLine(log);
                             Console.ResetColor();
                         }
@@ -263,11 +286,11 @@ namespace InstagramScanLauncher
             }
             catch (Exception ex)
             {
-                LogError("Log Görüntüleme", ex);
+                _logger.LogError("Log Görüntüleme", ex);
                 Console.WriteLine($"Log dosyası okunamadı: {ex.Message}");
             }
         }
-
+        
         /// <summary>
         /// Kullanıcı bilgilerini gösterir
         /// </summary>
@@ -280,19 +303,19 @@ namespace InstagramScanLauncher
                 
                 if (string.IsNullOrWhiteSpace(username))
                 {
-                    WriteLog("Boş kullanıcı adı girişi");
+                    _logger.LogInfo("Boş kullanıcı adı girişi");
                     Console.WriteLine("Kullanıcı adı boş olamaz!");
                     return;
                 }
                 
-                WriteLog($"Kullanıcı bilgileri isteniyor: {username}");
+                _logger.LogInfo($"Kullanıcı bilgileri isteniyor: {username}");
                 Console.WriteLine($"\n{username} kullanıcısı için bilgiler getiriliyor...");
                 
                 var user = await _instagramFunc.GetUserAsync(username, _cookies);
                 
                 if (user != null)
                 {
-                    WriteLog($"Kullanıcı bilgileri başarıyla alındı: {username}");
+                    _logger.LogInfo($"Kullanıcı bilgileri başarıyla alındı: {username}");
                     
                     Console.WriteLine("\n=== Kullanıcı Bilgileri ===");
                     Console.WriteLine($"ID: {user.Id}");
@@ -307,13 +330,13 @@ namespace InstagramScanLauncher
             }
             catch (Exception ex)
             {
-                LogError("Kullanıcı Bilgileri", ex);
+                _logger.LogError("Kullanıcı Bilgileri", ex);
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"\nHata: {ex.Message}");
                 Console.ResetColor();
             }
         }
-
+        
         /// <summary>
         /// Kullanıcının paylaşımlarını gösterir
         /// </summary>
@@ -326,12 +349,12 @@ namespace InstagramScanLauncher
                 
                 if (string.IsNullOrWhiteSpace(username))
                 {
-                    WriteLog("Boş kullanıcı adı girişi");
+                    _logger.LogInfo("Boş kullanıcı adı girişi");
                     Console.WriteLine("Kullanıcı adı boş olamaz!");
                     return;
                 }
                 
-                WriteLog($"Kullanıcı postları isteniyor: {username}");
+                _logger.LogInfo($"Kullanıcı postları isteniyor: {username}");
                 Console.WriteLine($"\n{username} kullanıcısı için bilgiler getiriliyor...");
                 
                 var user = await _instagramFunc.GetUserAsync(username, _cookies);
@@ -342,14 +365,14 @@ namespace InstagramScanLauncher
                     pageCount = 1;
                 }
                 
-                WriteLog($"{username} kullanıcısı için {pageCount} sayfa post isteniyor");
+                _logger.LogInfo($"{username} kullanıcısı için {pageCount} sayfa post isteniyor");
                 Console.WriteLine($"\n{username} kullanıcısının gönderileri getiriliyor...");
                 
                 var posts = await _instagramFunc.GetPostsFromUserIdAsync(user.Id, _cookies, pageCount: pageCount);
                 
                 if (posts != null && posts.Any())
                 {
-                    WriteLog($"{posts.Count} post başarıyla alındı");
+                    _logger.LogInfo($"{posts.Count} post başarıyla alındı");
                     
                     Console.WriteLine($"\n=== {username} kullanıcısının gönderileri ({posts.Count:N0} post) ===");
                     
@@ -365,19 +388,19 @@ namespace InstagramScanLauncher
                 }
                 else
                 {
-                    WriteLog($"{username} kullanıcısının postu bulunamadı");
+                    _logger.LogInfo($"{username} kullanıcısının postu bulunamadı");
                     Console.WriteLine("Bu kullanıcının hiç gönderisi yok veya gönderileri gizli.");
                 }
             }
             catch (Exception ex)
             {
-                LogError("Kullanıcı Postları", ex);
+                _logger.LogError("Kullanıcı Postları", ex);
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"\nHata: {ex.Message}");
                 Console.ResetColor();
             }
         }
-
+        
         /// <summary>
         /// Hashtag ile ilgili postları gösterir
         /// </summary>
@@ -390,7 +413,7 @@ namespace InstagramScanLauncher
                 
                 if (string.IsNullOrWhiteSpace(tag))
                 {
-                    WriteLog("Boş hashtag girişi");
+                    _logger.LogInfo("Boş hashtag girişi");
                     Console.WriteLine("Hashtag boş olamaz!");
                     return;
                 }
@@ -401,14 +424,14 @@ namespace InstagramScanLauncher
                     postCount = 20;
                 }
                 
-                WriteLog($"#{tag} hashtagi için {postCount} post isteniyor");
+                _logger.LogInfo($"#{tag} hashtagi için {postCount} post isteniyor");
                 Console.WriteLine($"\n#{tag} hashtagi ile ilgili postlar getiriliyor...");
                 
                 var posts = await _instagramFunc.GetPostsFromTagAsync(tag, _cookies, postPerPage: postCount);
                 
                 if (posts != null && posts.Any())
                 {
-                    WriteLog($"#{tag} için {posts.Count} post başarıyla alındı");
+                    _logger.LogInfo($"#{tag} için {posts.Count} post başarıyla alındı");
                     
                     Console.WriteLine($"\n=== #{tag} hashtagi ile ilgili postlar ({posts.Count:N0} post) ===");
                     
@@ -424,19 +447,19 @@ namespace InstagramScanLauncher
                 }
                 else
                 {
-                    WriteLog($"#{tag} için post bulunamadı");
+                    _logger.LogInfo($"#{tag} için post bulunamadı");
                     Console.WriteLine("Bu hashtag ile ilgili post bulunamadı veya Instagram erişimi kısıtlamış olabilir.");
                 }
             }
             catch (Exception ex)
             {
-                LogError("Hashtag Arama", ex);
+                _logger.LogError("Hashtag Arama", ex);
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"\nHata: {ex.Message}");
                 Console.ResetColor();
             }
         }
-
+        
         /// <summary>
         /// Bir gönderinin yorumlarını gösterir
         /// </summary>
@@ -449,7 +472,7 @@ namespace InstagramScanLauncher
                 
                 if (string.IsNullOrWhiteSpace(input))
                 {
-                    WriteLog("Boş post URL/kodu girişi");
+                    _logger.LogInfo("Boş post URL/kodu girişi");
                     Console.WriteLine("URL veya kısa kod boş olamaz!");
                     return;
                 }
@@ -466,14 +489,14 @@ namespace InstagramScanLauncher
                     }
                 }
                 
-                WriteLog($"Post yorumları isteniyor: {shortcode}");
+                _logger.LogInfo($"Post yorumları isteniyor: {shortcode}");
                 Console.WriteLine($"\nPost yorumları getiriliyor: {shortcode}");
                 
                 var comments = await _instagramFunc.GetCommentsAsync(shortcode, _cookies);
                 
                 if (comments != null && comments.Any())
                 {
-                    WriteLog($"{comments.Count} yorum başarıyla alındı");
+                    _logger.LogInfo($"{comments.Count} yorum başarıyla alındı");
                     
                     Console.WriteLine($"\n=== Post Yorumları ({comments.Count:N0} yorum) ===");
                     
@@ -495,45 +518,47 @@ namespace InstagramScanLauncher
                 }
                 else
                 {
-                    WriteLog("Post için yorum bulunamadı");
+                    _logger.LogInfo("Post için yorum bulunamadı");
                     Console.WriteLine("Bu postta hiç yorum yok veya yorumlar gizlenmiş.");
                 }
             }
             catch (Exception ex)
             {
-                LogError("Post Yorumları", ex);
+                _logger.LogError("Post Yorumları", ex);
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine($"\nHata: {ex.Message}");
                 Console.ResetColor();
             }
         }
-
+        
         /// <summary>
         /// Oturum çerezlerini kaydeder
         /// </summary>
-        static void SaveCookies(Dictionary<string, string> cookies, string path)
+        static void SaveCookies(Dictionary<string, string> cookies)
         {
             try
             {
-                string jsonCookies = JsonConvert.SerializeObject(cookies);
-                File.WriteAllText(path, jsonCookies);
+                var options = new JsonSerializerOptions
+                {
+                    WriteIndented = true
+                };
+                string jsonCookies = JsonSerializer.Serialize(cookies, options);
+                File.WriteAllText(CookiePath, jsonCookies);
                 Console.WriteLine("Oturum bilgileri kaydedildi.");
             }
             catch (Exception ex)
             {
+                _logger.LogError("Oturum kaydedilirken hata", ex);
                 Console.WriteLine($"Oturum bilgileri kaydedilemedi: {ex.Message}");
             }
         }
-
+        
         /// <summary>
         /// Selenium ile tarayıcıyı açarak instagram login istenir ve login sonrası tarayıcıyı kapatarak aktif cookie verilerini döner.
         /// </summary>
         static Dictionary<string, string> GetCookies()
         {
-            /* 
-             * Bazı fonksiyonları kullanmak için cookie istenecek. 
-             * Aşağıdaki yöntem ile cookie verisi alınıp fonksiyona gönderilebilir.
-             */
+            _logger.LogInfo("Tarayıcı açılarak Instagram hesabı girişi isteniyor");
             Console.WriteLine("Chrome tarayıcısı başlatılıyor...");
             
             var options = new ChromeOptions();
@@ -551,6 +576,7 @@ namespace InstagramScanLauncher
             {
                 if (!driver.Url.Contains("accounts/login"))
                 {
+                    _logger.LogInfo("Instagram hesabına giriş başarılı");
                     Console.WriteLine("Giriş başarılı! Tarayıcı 3 saniye içinde kapanacak.");
                     break;
                 }
@@ -564,6 +590,8 @@ namespace InstagramScanLauncher
             var cookies = driverCookies.AllCookies.ToDictionary(w => w.Name, x => x.Value);
             driver.Close();
             driver.Quit();
+            
+            _logger.LogInfo($"{cookies.Count} adet cookie alındı");
             return cookies;
         }
     }

@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Configuration;
 using System;
+using System.IO;
 
 namespace InstagramAPI.Configuration
 {
@@ -17,6 +19,29 @@ namespace InstagramAPI.Configuration
         public string LogPrefix { get; set; } = "[InstagramAPI]";
         public bool IncludeTimestampInLogs { get; set; } = true;
         
-        public static InstagramApiConfig Default => new InstagramApiConfig();
+        public static InstagramApiConfig Default => LoadFromConfiguration();
+        
+        // Konfigürasyon dosyasından ayarları oku
+        public static InstagramApiConfig LoadFromConfiguration()
+        {
+            try
+            {
+                var builder = new ConfigurationBuilder()
+                    .SetBasePath(Directory.GetCurrentDirectory())
+                    .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+
+                var configuration = builder.Build();
+                
+                var config = new InstagramApiConfig();
+                configuration.GetSection("InstagramApiConfig").Bind(config);
+                
+                return config;
+            }
+            catch (Exception)
+            {
+                // Hata durumunda varsayılan değerler kullan
+                return new InstagramApiConfig();
+            }
+        }
     }
 }
