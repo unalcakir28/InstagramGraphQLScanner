@@ -1,48 +1,45 @@
 ﻿using InstagramAPI.Models;
+using InstagramAPI.Logging;
+using InstagramAPI.Exceptions;
+using InstagramAPI.Configuration;
+using InstagramAPI.Services;
 using Newtonsoft.Json.Linq;
 using RestSharp;
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Http;
-using System.Text;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Diagnostics;
 
 namespace InstagramAPI
 {
-    /// <summary>
-    /// Instagram API işlemlerini yöneten ana sınıf
-    /// </summary>
-    public class Functions
+    public class Functions : IInstagramApiService
     {
-        private readonly Random rnd = new Random();
-        private readonly string _logPrefix = "[InstagramAPI]";
+        private readonly Random _rnd = new Random();
+        private readonly ILogger _logger;
+        private readonly InstagramApiConfig _config;
 
-        /// <summary>
-        /// API isteklerinin durumunu loglayan yardımcı metot
-        /// </summary>
-        private void LogApiCall(string endpoint, System.Net.HttpStatusCode statusCode, string message)
+        public Functions(ILogger logger = null, InstagramApiConfig config = null)
         {
-            var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            Debug.WriteLine($"{timestamp} {_logPrefix} [{endpoint}] Status: {statusCode} - {message}");
-            Console.WriteLine($"{_logPrefix} [{endpoint}] {message}");
+            _logger = logger ?? new ConsoleLogger();
+            _config = config ?? InstagramApiConfig.Default;
         }
 
-        // Instagram API yanıtlarını temizleyen yardımcı metot
+        private void LogApiCall(string endpoint, HttpStatusCode statusCode, string message)
+        {
+            _logger.LogInfo($"[{endpoint}] Status: {statusCode} - {message}");
+        }
+
         private string CleanInstagramResponse(string response)
         {
             try
             {
                 if (string.IsNullOrEmpty(response))
                 {
-                    throw new ArgumentNullException(nameof(response), "API yanıtı boş");
+                    throw new InstagramApiException("API yanıtı boş");
                 }
-
-                // "for (;;);" veya diğer önekleri temizle
                 if (response.StartsWith("for (;;);"))
                 {
                     response = response.Substring(9);
@@ -51,12 +48,11 @@ namespace InstagramAPI
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"{_logPrefix} [CleanResponse] Hata: {ex.Message}");
-                throw new Exception("API yanıtı temizlenirken hata oluştu: " + ex.Message);
+                _logger.LogError("API yanıtı temizlenirken hata oluştu", ex);
+                throw new InstagramApiException("API yanıtı temizlenirken hata oluştu", ex);
             }
         }
 
-        // Cookies içinden CSRF token'ı çıkaran yardımcı metot
         private string GetCsrfToken(Dictionary<string, string> cookies)
         {
             if (cookies.TryGetValue("csrftoken", out string csrfToken))
@@ -66,250 +62,187 @@ namespace InstagramAPI
             return null;
         }
 
-        // Güvenli bir kullanıcı aracısı döndüren yardımcı metot
-        private string GetUserAgent()
+        private RestRequest CreateBaseRequest(Method method, Dictionary<string, string> cookies)
         {
-            return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
-        }
-
-        /// <summary>
-        /// Kullanıcı adı ile instagram veritabanındaki public kullanıcı verilerini getirir.
-        /// </summary>
-        /// <param name="userName">Zorunludur. Verileri getirilecek kullanıcının instagram kullanıcı adı girilmelidir. https://www.instagram.com/X/ url'indeki X alanında yazan değerdir</param>
-        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
-        public User GetUser(string userName, Dictionary<string, string> cookies)
-        {
-            if (string.IsNullOrEmpty(userName))
-                throw new ArgumentNullException(nameof(userName));
-
-            if (cookies == null || !cookies.Any())
-                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
-
-            LogApiCall("GetUser", System.Net.HttpStatusCode.Processing, $"Kullanıcı verisi isteniyor: {userName}");
-            
-            // Son Instagram API değişikliklerinde farklı endpoint kullanılmaya başlandı
-            var client = new RestClient($"https://www.instagram.com/api/v1/users/web_profile_info/?username={userName}");
-            client.Timeout = -1;
-            var request = new RestRequest(Method.GET);
-            
-            // Gerekli HTTP başlıkları ekle
-            request.AddHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36");
+            var request = new RestRequest(method);
+            request.AddHeader("User-Agent", _config.UserAgent);
             request.AddHeader("Accept", "*/*");
-            request.AddHeader("X-IG-App-ID", "936619743392459"); // Instagram web uygulamasının App ID'si
+            request.AddHeader("X-IG-App-ID", _config.AppId);
             request.AddHeader("X-ASBD-ID", "129477");
             request.AddHeader("X-IG-WWW-Claim", "0");
-            
+
+            string csrfToken = GetCsrfToken(cookies);
+            if (!string.IsNullOrEmpty(csrfToken))
+            {
+                request.AddHeader("X-CSRFToken", csrfToken);
+            }
+
             foreach (var cookie in cookies)
             {
                 request.AddCookie(cookie.Key, cookie.Value);
             }
-            
-            try
-            {
-                // API isteği yapılıyor
-                IRestResponse response = client.Execute(request);
-                LogApiCall("GetUser", response.StatusCode, $"API yanıtı alındı ({response.StatusCode})");
 
-                Thread.Sleep(rnd.Next(3000, 5000));
-
-                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    LogApiCall("GetUser", response.StatusCode, $"Kullanıcı bulunamadı: {userName}");
-                    throw new Exception($"Kullanıcı bulunamadı: {userName}");
-                }
-
-                // Hata yakalama ve debug için yanıtı kontrol et
-                Console.WriteLine("API Yanıt Kodu: " + response.StatusCode);
-                Console.WriteLine("API Yanıt Başlıkları: " + string.Join(", ", response.Headers.Select(h => $"{h.Name}: {h.Value}")));
-                
-                try {
-                    var cleanedResponse = CleanInstagramResponse(response.Content);
-                    Console.WriteLine("Temizlenmiş API Yanıtı: " + cleanedResponse);
-                    
-                    dynamic data = JObject.Parse(cleanedResponse);
-                    
-                    // Yeni API yanıt yapısı, farklı bir JSON şemasına sahip
-                    var userData = data.data.user;
-                    
-                    if (userData == null)
-                    {
-                        throw new Exception("Kullanıcı bilgileri alınamadı. Instagram oturumu geçersiz olabilir.");
-                    }
-                    
-                    var user = new User();
-                    user.Id = userData.id;
-                    user.UserName = userData.username;
-                    user.FullName = userData.full_name;
-                    user.Biography = userData.biography;
-                    user.ProfilePicture = userData.profile_pic_url;
-                    user.ProfilePictureHD = userData.profile_pic_url_hd ?? userData.profile_pic_url;
-                    user.FollowerCount = userData.edge_followed_by.count;
-                    user.FollowCount = userData.edge_follow.count;
-                    user.PostCount = userData.edge_owner_to_timeline_media.count;
-                    return user;
-                }
-                catch (Exception ex) {
-                    Console.WriteLine("JSON ayrıştırma hatası: " + ex.Message);
-                    
-                    // Yeniden oturum açmanın gerekli olduğunu belirten bir hata fırlat
-                    if (response.Content.Contains("errorSummary") && response.Content.Contains("Please try closing and re-opening your browser window"))
-                    {
-                        throw new Exception("Instagram oturumu geçersiz. Lütfen tarayıcıyı kapatıp açarak yeniden oturum açın.");
-                    }
-                    
-                    throw new Exception("Instagram API yanıtı ayrıştırılamadı. Instagram API yapısı değişmiş olabilir: " + ex.Message);
-                }
-            }
-            catch (Exception ex)
-            {
-                LogApiCall("GetUser", System.Net.HttpStatusCode.InternalServerError, $"Hata: {ex.Message}");
-                throw;
-            }
+            return request;
         }
 
-        /// <summary>
-        /// Hashtag altına yapılmış olan public paylaşımları getirir.
-        /// </summary>
-        /// <param name="tag">Zorunludur.</param>
-        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
-        /// <param name="after">Zorunlu değildir. Sayfalama için kullanılır.</param>
-        /// <param name="postPerPage">Zorunlu değildir. Default olarak 50 kullanılır ve maksimum 50 girilebilir. Her sayfada kaç post getirileceğini belirtir.</param>
-        /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
-        public List<Post> GetPostsFromTag(string tag, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
+        private async Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> action, string endpoint, int maxRetries = 3)
         {
-            if (string.IsNullOrEmpty(tag))
-                throw new ArgumentNullException(nameof(tag));
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    await Task.Delay(_rnd.Next(_config.MinRequestDelayMs, _config.MaxRequestDelayMs));
+                    return await action();
+                }
+                catch (InstagramRateLimitException ex)
+                {
+                    _logger.LogWarning($"Rate limit hit on {endpoint}. Attempt {i + 1}/{maxRetries}");
+                    if (i == maxRetries - 1) throw;
+                    await Task.Delay(_config.RetryDelayMs * (i + 1));
+                }
+                catch (Exception ex) when (i < maxRetries - 1)
+                {
+                    _logger.LogWarning($"Request failed for {endpoint}. Attempt {i + 1}/{maxRetries}. Error: {ex.Message}");
+                    await Task.Delay(_config.RetryDelayMs * (i + 1));
+                }
+            }
+            throw new InstagramApiException($"Maximum retry attempts ({maxRetries}) reached for {endpoint}");
+        }
 
+        public async Task<User> GetUserAsync(string userName, Dictionary<string, string> cookies)
+        {
+            if (string.IsNullOrEmpty(userName))
+                throw new ArgumentNullException(nameof(userName));
             if (cookies == null || !cookies.Any())
                 throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
 
-            LogApiCall("GetPostsFromTag", System.Net.HttpStatusCode.Processing, $"Hashtag postları isteniyor: #{tag}, Sayfa: {pageCount}");
-            
-            Console.WriteLine($"Hashtag postları isteniyor: {tag}, Sayfa: {pageCount}");
-            
-            try
+            return await ExecuteWithRetryAsync(async () =>
             {
-                // İlk olarak hashtag sayfasından öneri postları ve genel bilgileri alalım
-                var tagUrl = $"https://www.instagram.com/explore/tags/{tag}/";
-                var tagClient = new RestClient(tagUrl);
-                var tagRequest = new RestRequest(Method.GET);
-            
-                // Tarayıcı gibi davranmak için gereken başlıkları ekle
-                tagRequest.AddHeader("User-Agent", GetUserAgent());
-                tagRequest.AddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
-                tagRequest.AddHeader("Accept-Language", "en-US,en;q=0.9");
+                var endpoint = $"{_config.ApiVersion}/users/web_profile_info/?username={userName}";
+                LogApiCall(endpoint, HttpStatusCode.Processing, $"Kullanıcı verisi isteniyor: {userName}");
 
-                // Çerezleri ekle
-                foreach (var cookie in cookies)
+                var client = new RestClient($"{_config.BaseUrl}/{endpoint}");
+                var request = CreateBaseRequest(Method.GET, cookies);
+                
+                var response = await client.ExecuteAsync(request);
+                LogApiCall(endpoint, response.StatusCode, $"API yanıtı alındı ({response.StatusCode})");
+
+                if (response.StatusCode == HttpStatusCode.NotFound)
                 {
-                    tagRequest.AddCookie(cookie.Key, cookie.Value);
+                    _logger.LogWarning($"Kullanıcı bulunamadı: {userName}");
+                    throw new InstagramApiException($"Kullanıcı bulunamadı: {userName}", endpoint, response.StatusCode);
                 }
 
-                Console.WriteLine($"Hashtag sayfası yükleniyor: #{tag}...");
-                IRestResponse tagResponse = tagClient.Execute(tagRequest);
-                Thread.Sleep(rnd.Next(2000, 4000));
-
-                if (tagResponse.StatusCode != System.Net.HttpStatusCode.OK)
+                if (response.StatusCode != HttpStatusCode.OK)
                 {
-                    throw new Exception($"Hashtag sayfasına erişilemedi: {tagResponse.StatusCode}");
+                    throw new InstagramApiException($"API isteği başarısız: {response.StatusCode}", endpoint, response.StatusCode);
                 }
 
-                // GrapQL API kullanarak daha fazla post yükleyelim
-                var posts = new List<Post>();
-                
-                // API-v1 kullanımına geçelim - çalışan bir API endpoint'i
-                var url = $"https://www.instagram.com/api/v1/tags/logged_out_web_info/?tag_name={tag}";
-                var client = new RestClient(url);
-                client.Timeout = -1;
-                var request = new RestRequest(Method.GET);
-
-                // CSRF token'ı ekle (önemli)
-                string csrfToken = GetCsrfToken(cookies);
-                
-                // Gerekli HTTP başlıkları ekle
-                request.AddHeader("User-Agent", GetUserAgent());
-                request.AddHeader("Accept", "*/*");
-                request.AddHeader("X-IG-App-ID", "936619743392459");
-                request.AddHeader("X-ASBD-ID", "129477");
-                request.AddHeader("X-IG-WWW-Claim", "0");
-                request.AddHeader("X-Requested-With", "XMLHttpRequest");
-                request.AddHeader("X-CSRFToken", csrfToken);
-                request.AddHeader("Referer", $"https://www.instagram.com/explore/tags/{tag}/");
-                
-                // Çerezleri ekle
-                foreach (var cookie in cookies)
+                try
                 {
-                    request.AddCookie(cookie.Key, cookie.Value);
-                }
-                
-                IRestResponse response = client.Execute(request);
-                Thread.Sleep(rnd.Next(2000, 4000));
+                    var cleanedResponse = CleanInstagramResponse(response.Content);
+                    _logger.LogDebug($"API Yanıtı: {cleanedResponse}");
 
-                if (response.StatusCode != System.Net.HttpStatusCode.OK)
-                {
-                    Console.WriteLine($"Hata kodu: {response.StatusCode}, Yanıt: {response.Content}");
-                    
-                    // Test için başka bir endpoint deneyelim - keşfet sayfasından postlar alalım
-                    Console.WriteLine("Alternatif kaynak deneniyor: Keşfet API'si");
-                    var exploreUrl = "https://www.instagram.com/api/v1/discover/web/explore_grid/";
-                    var exploreClient = new RestClient(exploreUrl);
-                    var exploreRequest = new RestRequest(Method.GET);
-                    
-                    // Aynı başlıkları ekle
-                    exploreRequest.AddHeader("User-Agent", GetUserAgent());
-                    exploreRequest.AddHeader("Accept", "*/*");
-                    exploreRequest.AddHeader("X-IG-App-ID", "936619743392459");
-                    exploreRequest.AddHeader("X-ASBD-ID", "129477");
-                    exploreRequest.AddHeader("X-CSRFToken", csrfToken);
-                    exploreRequest.AddHeader("X-Requested-With", "XMLHttpRequest");
-                    
-                    // Çerezleri ekle
-                    foreach (var cookie in cookies)
+                    dynamic data = JObject.Parse(cleanedResponse);
+                    var userData = data.data.user;
+
+                    if (userData == null)
                     {
-                        exploreRequest.AddCookie(cookie.Key, cookie.Value);
+                        throw new InstagramAuthException("Kullanıcı bilgileri alınamadı. Instagram oturumu geçersiz olabilir.");
                     }
+
+                    return new User
+                    {
+                        Id = userData.id,
+                        UserName = userData.username,
+                        FullName = userData.full_name,
+                        Biography = userData.biography,
+                        ProfilePicture = userData.profile_pic_url,
+                        ProfilePictureHD = userData.profile_pic_url_hd ?? userData.profile_pic_url,
+                        FollowerCount = userData.edge_followed_by.count,
+                        FollowCount = userData.edge_follow.count,
+                        PostCount = userData.edge_owner_to_timeline_media.count
+                    };
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError("JSON ayrıştırma hatası", ex);
+                    if (response.Content.Contains("Please try closing and re-opening your browser window"))
+                    {
+                        throw new InstagramAuthException("Instagram oturumu geçersiz. Lütfen tarayıcıyı kapatıp açarak yeniden oturum açın.");
+                    }
+                    throw new InstagramApiException("Instagram API yanıtı ayrıştırılamadı", ex);
+                }
+            }, "GetUser");
+        }
+
+        public async Task<List<Post>> GetPostsFromTagAsync(string tag, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
+        {
+            if (string.IsNullOrEmpty(tag))
+                throw new ArgumentNullException(nameof(tag));
+            if (cookies == null || !cookies.Any())
+                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
+
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var posts = new List<Post>();
+                _logger.LogInfo($"Hashtag postları isteniyor: #{tag}, Sayfa: {pageCount}");
+
+                // İlk olarak hashtag sayfasından genel bilgileri alalım
+                var tagUrl = $"{_config.BaseUrl}/explore/tags/{tag}/";
+                var tagClient = new RestClient(tagUrl);
+                var tagRequest = CreateBaseRequest(Method.GET, cookies);
+
+                _logger.LogDebug($"Hashtag sayfası yükleniyor: #{tag}...");
+                var tagResponse = await tagClient.ExecuteAsync(tagRequest);
+
+                if (tagResponse.StatusCode != HttpStatusCode.OK)
+                {
+                    throw new InstagramApiException($"Hashtag sayfasına erişilemedi", "explore/tags", tagResponse.StatusCode);
+                }
+
+                // API-v1 endpoint'ini kullanalım
+                var endpoint = $"{_config.ApiVersion}/tags/logged_out_web_info/?tag_name={tag}";
+                var client = new RestClient($"{_config.BaseUrl}/{endpoint}");
+                var request = CreateBaseRequest(Method.GET, cookies);
+                request.AddHeader("Referer", tagUrl);
+
+                var response = await client.ExecuteAsync(request);
+
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    _logger.LogWarning($"API yanıtı başarısız: {response.StatusCode}. Alternatif kaynak deneniyor...");
                     
-                    // Keşfet API'sinden yanıt al
-                    IRestResponse exploreResponse = exploreClient.Execute(exploreRequest);
+                    // Alternatif olarak keşfet API'sini deneyelim
+                    var exploreEndpoint = $"{_config.ApiVersion}/discover/web/explore_grid/";
+                    var exploreClient = new RestClient($"{_config.BaseUrl}/{exploreEndpoint}");
+                    var exploreRequest = CreateBaseRequest(Method.GET, cookies);
                     
-                    if (exploreResponse.StatusCode == System.Net.HttpStatusCode.OK)
+                    var exploreResponse = await exploreClient.ExecuteAsync(exploreRequest);
+                    
+                    if (exploreResponse.StatusCode == HttpStatusCode.OK)
                     {
                         var cleanedExploreResponse = CleanInstagramResponse(exploreResponse.Content);
                         dynamic exploreData = JObject.Parse(cleanedExploreResponse);
                         
-                        Console.WriteLine("Keşfet API'sinden rastgele postlar gösteriliyor...");
+                        _logger.LogInfo("Keşfet API'sinden rastgele postlar alınıyor...");
                         
-                        // Keşfet sayfasından içerik ekleyelim
-                        if (exploreData.sectional_items != null && exploreData.sectional_items.Count > 0)
+                        if (exploreData.sectional_items != null)
                         {
                             foreach (var section in exploreData.sectional_items)
                             {
-                                if (section.layout_content != null && section.layout_content.medias != null)
+                                if (section.layout_content?.medias != null)
                                 {
                                     foreach (var mediaItem in section.layout_content.medias)
                                     {
                                         try
                                         {
-                                            var mediaNode = mediaItem.media;
-                                            var post = new Post();
-                                            post.Id = mediaNode.id;
-                                            post.ShortCode = mediaNode.code;
-                                            post.Caption = mediaNode.caption?.text ?? "(Hashtag araması şu anda kısıtlandı. Rastgele içerik gösteriliyor)";
-                                            post.isVideo = mediaNode.media_type == 2; // 2 = video, 1 = image
-                                            
-                                            if (mediaNode.image_versions2 != null && mediaNode.image_versions2.candidates != null && mediaNode.image_versions2.candidates.Count > 0)
-                                            {
-                                                post.Picture = mediaNode.image_versions2.candidates[0].url;
-                                                post.Thumbnail = mediaNode.image_versions2.candidates[1]?.url ?? mediaNode.image_versions2.candidates[0].url;
-                                            }
-                                            
-                                            post.CommentCount = mediaNode.comment_count ?? 0;
-                                            post.LikeCount = mediaNode.like_count ?? 0;
-                                            post.Date = Tools.UnixTimeStampToDateTime((double)mediaNode.taken_at);
-                                            post.PostUrl = "https://www.instagram.com/p/" + post.ShortCode;
-                                            posts.Add(post);
+                                            posts.Add(ConvertToPost(mediaItem.media));
                                         }
-                                        catch (Exception) { /* Hatalı medyayı atla */ }
+                                        catch (Exception ex)
+                                        {
+                                            _logger.LogDebug($"Post dönüştürme hatası: {ex.Message}");
+                                        }
                                     }
                                 }
                             }
@@ -318,420 +251,224 @@ namespace InstagramAPI
                     
                     if (posts.Count > 0)
                     {
-                        Console.WriteLine($"Toplam {posts.Count} post bulundu (alternatif API'den)");
+                        _logger.LogInfo($"Toplam {posts.Count} post bulundu (alternatif API'den)");
                         return posts;
                     }
                     
-                    throw new Exception($"Instagram API hatası: {response.StatusCode} - Hashtag verileri alınamadı");
+                    throw new InstagramApiException("Hashtag verileri alınamadı", endpoint, response.StatusCode);
                 }
 
-                try {
+                try
+                {
                     var cleanedResponse = CleanInstagramResponse(response.Content);
-                    Console.WriteLine("Hashtag API yanıt özeti: " + cleanedResponse.Substring(0, Math.Min(100, cleanedResponse.Length)));
+                    _logger.LogDebug($"Hashtag API yanıt özeti: {cleanedResponse.Substring(0, Math.Min(100, cleanedResponse.Length))}");
                     
                     dynamic data = JObject.Parse(cleanedResponse);
                     
-                    // Hata kontrolü
                     if (data.status != "ok")
                     {
-                        throw new Exception("Instagram API yanıtı başarısız: " + data.message);
+                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + data.message);
                     }
                     
-                    // Top ve Recent postları çek
                     if (data.data != null)
                     {
-                        // Öne çıkan postlar
-                        if (data.data.top != null && data.data.top.sections != null)
-                        {
-                            foreach (var section in data.data.top.sections)
-                            {
-                                try 
-                                {
-                                    var mediaNode = section.media;
-                                    var post = new Post();
-                                    post.Id = mediaNode.id;
-                                    post.ShortCode = mediaNode.code;
-                                    post.Caption = mediaNode.caption?.text ?? "";
-                                    post.isVideo = mediaNode.is_video;
-                                    post.Picture = mediaNode.display_url;
-                                    post.Thumbnail = mediaNode.thumbnail_src ?? mediaNode.display_url;
-                                    post.CommentCount = mediaNode.comment_count;
-                                    post.LikeCount = mediaNode.like_count;
-                                    post.Date = Tools.UnixTimeStampToDateTime((double)mediaNode.taken_at);
-                                    post.PostUrl = "https://www.instagram.com/p/" + post.ShortCode;
-                                    posts.Add(post);
-                                }
-                                catch (Exception) { /* Hatalı medyayı atla */ }
-                            }
-                        }
-                        
-                        // Son postlar
-                        if (data.data.recent != null && data.data.recent.sections != null)
-                        {
-                            foreach (var section in data.data.recent.sections)
-                            {
-                                try
-                                {
-                                    var mediaNode = section.media;
-                                    var post = new Post();
-                                    post.Id = mediaNode.id;
-                                    post.ShortCode = mediaNode.code;
-                                    post.Caption = mediaNode.caption?.text ?? "";
-                                    post.isVideo = mediaNode.is_video;
-                                    post.Picture = mediaNode.display_url;
-                                    post.Thumbnail = mediaNode.thumbnail_src ?? mediaNode.display_url;
-                                    post.CommentCount = mediaNode.comment_count;
-                                    post.LikeCount = mediaNode.like_count;
-                                    post.Date = Tools.UnixTimeStampToDateTime((double)mediaNode.taken_at);
-                                    post.PostUrl = "https://www.instagram.com/p/" + post.ShortCode;
-                                    posts.Add(post);
-                                }
-                                catch (Exception) { /* Hatalı medyayı atla */ }
-                            }
-                        }
+                        // Öne çıkan ve son postları işle
+                        ProcessMediaNodes(posts, data.data.top?.sections);
+                        ProcessMediaNodes(posts, data.data.recent?.sections);
                     }
                     
-                    // Eğer içerik bulamazsak HTML içerisinden veri çekmeyi deneyelim
+                    // HTML içinden veri çıkarma denemesi
                     if (posts.Count == 0)
                     {
-                        Console.WriteLine("API yanıtından post bulunamadı, HTML içeriği ayrıştırılıyor...");
+                        _logger.LogInfo("API yanıtından post bulunamadı, HTML içeriği ayrıştırılıyor...");
                         
-                        // HTML içerisinden JSON veri çıkar
-                        var content = tagResponse.Content;
-                        var match = Regex.Match(content, @"<script type=""application/json"" data-sj>(.*?)</script>");
-                        
+                        var match = Regex.Match(tagResponse.Content, @"<script type=""application/json"" data-sj>(.*?)</script>");
                         if (match.Success)
                         {
-                            string jsonData = match.Groups[1].Value;
-                            try
+                            dynamic htmlData = JObject.Parse(match.Groups[1].Value);
+                            if (htmlData.hashtag?.edge_hashtag_to_media?.edges != null)
                             {
-                                dynamic htmlData = JObject.Parse(jsonData);
-                                
-                                // Veriyi işle
-                                if (htmlData.hashtag != null && 
-                                    htmlData.hashtag.edge_hashtag_to_media != null && 
-                                    htmlData.hashtag.edge_hashtag_to_media.edges != null)
+                                foreach (var edge in htmlData.hashtag.edge_hashtag_to_media.edges)
                                 {
-                                    foreach (var edge in htmlData.hashtag.edge_hashtag_to_media.edges)
+                                    try
                                     {
-                                        try
-                                        {
-                                            var node = edge.node;
-                                            var post = new Post();
-                                            post.Id = node.id;
-                                            post.ShortCode = node.shortcode;
-                                            post.Caption = node.edge_media_to_caption?.edges[0]?.node.text ?? "";
-                                            post.isVideo = node.is_video;
-                                            post.Picture = node.display_url;
-                                            post.Thumbnail = node.thumbnail_src;
-                                            post.CommentCount = node.edge_media_to_comment?.count ?? 0;
-                                            post.LikeCount = node.edge_liked_by?.count ?? 0;
-                                            post.Date = Tools.UnixTimeStampToDateTime((double)node.taken_at_timestamp);
-                                            post.PostUrl = "https://www.instagram.com/p/" + post.ShortCode;
-                                            posts.Add(post);
-                                        }
-                                        catch (Exception) { /* Hatalı düğümü atla */ }
+                                        posts.Add(ConvertToPost(edge.node));
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogDebug($"HTML post dönüştürme hatası: {ex.Message}");
                                     }
                                 }
                             }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine("HTML ayrıştırma hatası: " + ex.Message);
-                            }
                         }
                     }
-                    
-                    Console.WriteLine($"Toplam {posts.Count} post bulundu");
+
+                    _logger.LogInfo($"Toplam {posts.Count} post bulundu");
                     return posts;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("Hashtag API hatası: " + ex.Message);
-                    throw new Exception("Instagram hashtag API yanıtı işlenemedi: " + ex.Message);
+                    _logger.LogError("Hashtag verisi işlenirken hata", ex);
+                    throw new InstagramApiException("Instagram hashtag API yanıtı işlenemedi", ex);
                 }
-            }
-            catch (Exception ex)
+            }, "GetPostsFromTag");
+        }
+
+        private void ProcessMediaNodes(List<Post> posts, dynamic sections)
+        {
+            if (sections == null) return;
+
+            foreach (var section in sections)
             {
-                Console.WriteLine("Hashtag API hatası: " + ex.Message);
-                throw new Exception("Hashtag verileri alınamadı: " + ex.Message);
+                try
+                {
+                    var mediaNode = section.media;
+                    posts.Add(ConvertToPost(mediaNode));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug($"Media node işleme hatası: {ex.Message}");
+                }
             }
         }
 
-        /// <summary>
-        /// Kullanıcının paylaştığı postları getirir.
-        /// </summary>
-        /// <param name="userId">Zorunludur. GetUser fonksiyonu yardımı ile userId bilgisi alınabilir.</param>
-        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
-        /// <param name="after">Zorunlu değildir. Sayfalama için kullanılır.</param>
-        /// <param name="postPerPage">Zorunlu değildir. Default olarak 50 kullanılır ve maksimum 50 girilebilir. Her sayfada kaç post getirileceğini belirtir.</param>
-        /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
-        public List<Post> GetPostsFromUserId(string userId, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
+        private Post ConvertToPost(dynamic node)
+        {
+            var post = new Post
+            {
+                Id = node.id,
+                ShortCode = node.code ?? node.shortcode,
+                Caption = node.caption?.text ?? "",
+                isVideo = node.is_video ?? (node.media_type == 2),
+                Picture = node.display_url ?? node.image_versions2?.candidates[0]?.url,
+                Thumbnail = node.thumbnail_src ?? node.image_versions2?.candidates[1]?.url ?? node.image_versions2?.candidates[0]?.url,
+                CommentCount = node.comment_count ?? node.edge_media_to_comment?.count ?? 0,
+                LikeCount = node.like_count ?? node.edge_liked_by?.count ?? 0,
+                Date = Tools.UnixTimeStampToDateTime((double)(node.taken_at ?? node.taken_at_timestamp)),
+            };
+            
+            post.PostUrl = $"https://www.instagram.com/p/{post.ShortCode}";
+            return post;
+        }
+
+        public async Task<List<Post>> GetPostsFromUserIdAsync(string userId, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
         {
             if (string.IsNullOrEmpty(userId))
                 throw new ArgumentNullException(nameof(userId));
-
             if (cookies == null || !cookies.Any())
                 throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
 
-            LogApiCall("GetPostsFromUserId", System.Net.HttpStatusCode.Processing, $"Kullanıcı postları isteniyor: {userId}, Sayfa: {pageCount}");
-
-            Console.WriteLine($"Kullanıcı postları isteniyor: {userId}, Sayfa: {pageCount}");
-            
-            // Güncel Instagram kullanıcı medya API endpoint'i
-            var url = $"https://www.instagram.com/api/v1/feed/user/{userId}/";
-            var client = new RestClient(url);
-            client.Timeout = -1;
-            var request = new RestRequest(Method.GET);
-            
-            // Gerekli HTTP başlıkları ekle
-            request.AddHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36");
-            request.AddHeader("Accept", "*/*");
-            request.AddHeader("X-IG-App-ID", "936619743392459");
-            request.AddHeader("X-ASBD-ID", "129477");
-            request.AddHeader("X-IG-WWW-Claim", "0");
-            
-            // Parametreleri ekle
-            request.AddQueryParameter("count", postPerPage.ToString());
-            if (!string.IsNullOrEmpty(after))
+            return await ExecuteWithRetryAsync(async () =>
             {
-                request.AddQueryParameter("max_id", after);
-            }
-            
-            foreach (var cookie in cookies)
-            {
-                request.AddCookie(cookie.Key, cookie.Value);
-            }
-            
-            IRestResponse response = client.Execute(request);
-            Thread.Sleep(rnd.Next(3000, 5000));
+                var endpoint = $"{_config.ApiVersion}/feed/user/{userId}/";
+                _logger.LogInfo($"Kullanıcı postları isteniyor: {userId}, Sayfa: {pageCount}");
 
-            if (response.StatusCode != System.Net.HttpStatusCode.OK)
-            {
-                Console.WriteLine($"Hata kodu: {response.StatusCode}, Yanıt: {response.Content}");
-                throw new Exception($"Instagram API hatası: {response.StatusCode}");
-            }
+                var client = new RestClient($"{_config.BaseUrl}/{endpoint}");
+                var request = CreateBaseRequest(Method.GET, cookies);
 
-            try {
-                var cleanedResponse = CleanInstagramResponse(response.Content);
-                Console.WriteLine("Kullanıcı postları API yanıt özeti: " + cleanedResponse.Substring(0, Math.Min(100, cleanedResponse.Length)));
-                
-                dynamic data = JObject.Parse(cleanedResponse);
-                
-                // Hata kontrolü
-                if (data.status != "ok")
+                // Parametreleri ekle
+                request.AddQueryParameter("count", postPerPage.ToString());
+                if (!string.IsNullOrEmpty(after))
                 {
-                    throw new Exception("Instagram API yanıtı başarısız: " + data.message);
+                    request.AddQueryParameter("max_id", after);
                 }
-                
-                var posts = new List<Post>();
-                var items = data.items;
-                
-                foreach (var item in items)
+
+                var response = await client.ExecuteAsync(request);
+                LogApiCall(endpoint, response.StatusCode, $"API yanıtı alındı ({response.StatusCode})");
+
+                if (response.StatusCode != HttpStatusCode.OK)
                 {
-                    var post = new Post();
-                    post.Id = item.id;
-                    
-                    if (item.image_versions2 != null && item.image_versions2.candidates != null && item.image_versions2.candidates.Count > 0)
+                    throw new InstagramApiException($"Kullanıcı postları alınamadı", endpoint, response.StatusCode);
+                }
+
+                try
+                {
+                    var cleanedResponse = CleanInstagramResponse(response.Content);
+                    _logger.LogDebug($"Kullanıcı postları API yanıt özeti: {cleanedResponse.Substring(0, Math.Min(100, cleanedResponse.Length))}");
+
+                    dynamic data = JObject.Parse(cleanedResponse);
+
+                    if (data.status != "ok")
                     {
-                        post.Picture = item.image_versions2.candidates[0].url;
-                        post.Thumbnail = item.image_versions2.candidates[1]?.url ?? item.image_versions2.candidates[0].url;
+                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + data.message);
                     }
-                    else if (item.carousel_media != null && item.carousel_media.Count > 0)
+
+                    var posts = new List<Post>();
+                    if (data.items != null)
                     {
-                        // Carousel post (çoklu medya)
-                        var firstMedia = item.carousel_media[0];
-                        if (firstMedia.image_versions2 != null && firstMedia.image_versions2.candidates != null && firstMedia.image_versions2.candidates.Count > 0)
-                        {
-                            post.Picture = firstMedia.image_versions2.candidates[0].url;
-                            post.Thumbnail = firstMedia.image_versions2.candidates[1]?.url ?? firstMedia.image_versions2.candidates[0].url;
-                        }
-                    }
-                    
-                    post.Caption = item.caption?.text ?? "";
-                    post.isVideo = item.media_type == 2; // 2 = video, 1 = image, 8 = carousel
-                    post.ShortCode = item.code;
-                    post.CommentCount = item.comment_count;
-                    post.LikeCount = item.like_count;
-                    post.Date = Tools.UnixTimeStampToDateTime((double)item.taken_at);
-                    post.PostUrl = "https://www.instagram.com/p/" + post.ShortCode;
-                    posts.Add(post);
-                }
-                
-                // Pagination kontrolü
-                bool has_next_page = data.more_available == true;
-                string end_cursor = data.next_max_id?.ToString();
-                
-                if (!has_next_page || string.IsNullOrEmpty(end_cursor) || pageCount == 1)
-                    return posts;
-                
-                var nextPosts = GetPostsFromUserId(userId, cookies, postPerPage: postPerPage, pageCount: --pageCount, after: end_cursor);
-                posts.AddRange(nextPosts);
-                return posts;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Kullanıcı postları API hatası: " + ex.Message);
-                throw new Exception("Instagram kullanıcı postları API yanıtı işlenemedi: " + ex.Message);
-            }
-        }
-
-        /// <summary>
-        /// Post'un altına yapılan yorumları getirir.
-        /// </summary>
-        /// <param name="shortcode">Zorunludur. Instagram'ı tarayıcıda açtığınızda https://www.instagram.com/p/X/ url'indeki X alanında yazan değerdir.</param>
-        /// <param name="cookies">Zorunludur. Aktif cookie verileri tarayıcıdan alınarak girilebilir.</param>
-        /// <param name="after">Zorunlu değildir. Sayfalama için kullanılır.</param>
-        /// <param name="postPerPage">Zorunlu değildir. Default olarak 50 kullanılır ve maksimum 50 girilebilir. Her sayfada kaç post getirileceğini belirtir.</param>
-        /// <param name="pageCount">Zorunlu değildir. Kaç sayfalık post getirileceğini belirtir.</param>
-        public List<Comment> GetComments(string shortcode, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
-        {
-            if (string.IsNullOrEmpty(shortcode))
-                throw new ArgumentNullException(nameof(shortcode));
-
-            if (cookies == null || !cookies.Any())
-                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
-
-            LogApiCall("GetComments", System.Net.HttpStatusCode.Processing, $"Post yorumları isteniyor: {shortcode}, Sayfa: {pageCount}");
-
-            Console.WriteLine($"Post yorumları isteniyor: {shortcode}, Sayfa: {pageCount}");
-            var comments = new List<Comment>();
-            
-            try
-            {
-                // 1. Önce post sayfasına gidelim ve temel içeriği alalım
-                var postUrl = $"https://www.instagram.com/p/{shortcode}/";
-                var client = new RestClient(postUrl);
-                var request = new RestRequest(Method.GET);
-                
-                // Tarayıcı gibi davranmak için gereken başlıkları ekle
-                request.AddHeader("User-Agent", GetUserAgent());
-                request.AddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
-                request.AddHeader("Accept-Language", "en-US,en;q=0.9");
-                
-                foreach (var cookie in cookies)
-                {
-                    request.AddCookie(cookie.Key, cookie.Value);
-                }
-                
-                Console.WriteLine("Post sayfası yükleniyor...");
-                IRestResponse response = client.Execute(request);
-                Thread.Sleep(rnd.Next(2000, 4000));
-                
-                if (response.StatusCode != System.Net.HttpStatusCode.OK)
-                {
-                    throw new Exception($"Post sayfasına erişilemedi: {response.StatusCode}");
-                }
-                
-                // 2. Medya ID'sini HTML içeriğinden çıkaralım
-                var content = response.Content;
-                string mediaId = null;
-                
-                // Düzenli ifadelerle medya ID'sini bulmaya çalışalım
-                var mediaIdMatch = Regex.Match(content, @"""media_id"":""(\d+)""");
-                if (mediaIdMatch.Success)
-                {
-                    mediaId = mediaIdMatch.Groups[1].Value;
-                    Console.WriteLine($"HTML içeriğinden medya ID bulundu: {mediaId}");
-                }
-                else
-                {
-                    // Alternative approach to find media ID - using shared_data
-                    var sharedDataMatch = Regex.Match(content, @"window\._sharedData\s*=\s*({.+?});</script>");
-                    if (sharedDataMatch.Success)
-                    {
-                        try
-                        {
-                            dynamic sharedData = JObject.Parse(sharedDataMatch.Groups[1].Value);
-                            mediaId = sharedData.entry_data?.PostPage[0]?.graphql?.shortcode_media?.id;
-                            Console.WriteLine($"SharedData içeriğinden medya ID bulundu: {mediaId}");
-                        }
-                        catch { /* Parse hatalarını görmezden gel */ }
-                    }
-                    
-                    // Another alternative approach to find media ID
-                    if (string.IsNullOrEmpty(mediaId))
-                    {
-                        var appDataMatch = Regex.Match(content, @"<script type=""application/json"" data-sj>(.*?)</script>");
-                        if (appDataMatch.Success)
+                        foreach (var item in data.items)
                         {
                             try
                             {
-                                dynamic appData = JObject.Parse(appDataMatch.Groups[1].Value);
-                                mediaId = appData.items?[0]?.id;
-                                Console.WriteLine($"AppData içeriğinden medya ID bulundu: {mediaId}");
+                                posts.Add(ConvertToPost(item));
                             }
-                            catch { /* Parse hatalarını görmezden gel */ }
+                            catch (Exception ex)
+                            {
+                                _logger.LogDebug($"Post dönüştürme hatası: {ex.Message}");
+                            }
                         }
                     }
+
+                    // Sayfalama kontrolü
+                    bool hasNextPage = data.more_available == true;
+                    string nextCursor = data.next_max_id?.ToString();
+
+                    if (hasNextPage && !string.IsNullOrEmpty(nextCursor) && pageCount > 1)
+                    {
+                        _logger.LogInfo($"Sonraki sayfa yükleniyor. Cursor: {nextCursor}");
+                        var nextPosts = await GetPostsFromUserIdAsync(userId, cookies, nextCursor, postPerPage, --pageCount);
+                        posts.AddRange(nextPosts);
+                    }
+
+                    _logger.LogInfo($"Toplam {posts.Count} post bulundu");
+                    return posts;
                 }
-                
-                // 3. Eğer medya ID bulunamazsa bazı yorumları HTML'den çıkaralım
+                catch (Exception ex)
+                {
+                    _logger.LogError("Kullanıcı postları işlenirken hata", ex);
+                    throw new InstagramApiException("Instagram kullanıcı postları API yanıtı işlenemedi", ex);
+                }
+            }, "GetPostsFromUserId");
+        }
+
+        public async Task<List<Comment>> GetCommentsAsync(string shortcode, Dictionary<string, string> cookies, string after = null, int postPerPage = 50, int pageCount = int.MaxValue)
+        {
+            if (string.IsNullOrEmpty(shortcode))
+                throw new ArgumentNullException(nameof(shortcode));
+            if (cookies == null || !cookies.Any())
+                throw new ArgumentException("Geçerli cookie bilgileri gerekli", nameof(cookies));
+
+            return await ExecuteWithRetryAsync(async () =>
+            {
+                var comments = new List<Comment>();
+                _logger.LogInfo($"Post yorumları isteniyor: {shortcode}, Sayfa: {pageCount}");
+
+                // 1. Önce post sayfasından temel bilgileri alalım
+                var postUrl = $"{_config.BaseUrl}/p/{shortcode}/";
+                var client = new RestClient(postUrl);
+                var request = CreateBaseRequest(Method.GET, cookies);
+
+                _logger.LogDebug("Post sayfası yükleniyor...");
+                var response = await client.ExecuteAsync(request);
+
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    throw new InstagramApiException($"Post sayfasına erişilemedi", "p/" + shortcode, response.StatusCode);
+                }
+
+                // 2. Media ID'yi bul
+                string mediaId = await ExtractMediaIdAsync(response.Content);
                 if (string.IsNullOrEmpty(mediaId))
                 {
-                    Console.WriteLine("Medya ID bulunamadı. HTML içeriğinden yorumlar çıkarılmaya çalışılıyor...");
-                    
-                    // HTML içerisinden yorumları bulmaya çalış
-                    var commentDataMatches = Regex.Matches(content, @"""text"":""([^""\\]*(?:\\.[^""\\]*)*)"",""created_at"":(\d+\.?\d*),""owner"":{""id"":""(\d+)"",""profile_pic_url"":""([^""]+)"",""username"":""([^""]+)""}");
-                    
-                    foreach (Match match in commentDataMatches)
-                    {
-                        try
-                        {
-                            var commentText = match.Groups[1].Value;
-                            // Escape karakterlerini temizle (JSON string format)
-                            commentText = Regex.Unescape(commentText);
-                            
-                            var createdAt = double.Parse(match.Groups[2].Value);
-                            var ownerId = match.Groups[3].Value;
-                            var ownerPic = match.Groups[4].Value;
-                            var ownerName = match.Groups[5].Value;
-                            
-                            var comment = new Comment();
-                            comment.Id = $"{ownerId}_{createdAt}";
-                            comment.Text = commentText;
-                            comment.Date = Tools.UnixTimeStampToDateTime(createdAt);
-                            comment.OwnerName = ownerName;
-                            comment.OwnerPicture = ownerPic;
-                            comments.Add(comment);
-                        }
-                        catch { /* Hatalı yorumları atla */ }
-                    }
-                    
-                    // Hiç yorum bulamazsak sistem mesajı ekle
-                    if (comments.Count == 0)
-                    {
-                        var sysComment = new Comment();
-                        sysComment.Id = "info_" + DateTime.Now.Ticks;
-                        sysComment.Text = "Bu gönderiye ait yorum bulunamadı veya yorumlar kısıtlanmış durumda.";
-                        sysComment.Date = DateTime.Now;
-                        sysComment.OwnerName = "system_info";
-                        sysComment.OwnerPicture = "https://instagram.com/favicon.ico";
-                        comments.Add(sysComment);
-                    }
-                    
-                    Console.WriteLine($"{comments.Count} yorum HTML içeriğinden çıkarıldı");
-                    return comments;
+                    _logger.LogWarning("Media ID bulunamadı, HTML içeriğinden yorumlar çıkarılıyor...");
+                    return await ExtractCommentsFromHtmlAsync(response.Content);
                 }
-                
-                // 4. Medya ID ile yorumları çekelim (modern API)
-                var commentsUrl = $"https://www.instagram.com/api/v1/media/{mediaId}/comments/";
-                var commentsClient = new RestClient(commentsUrl);
-                var commentsRequest = new RestRequest(Method.GET);
-                
-                // Gerekli HTTP başlıkları ekle
-                commentsRequest.AddHeader("User-Agent", GetUserAgent());
-                commentsRequest.AddHeader("Accept", "*/*");
-                commentsRequest.AddHeader("X-IG-App-ID", "936619743392459");
-                commentsRequest.AddHeader("X-ASBD-ID", "129477");
-                commentsRequest.AddHeader("X-IG-WWW-Claim", "0");
-                
-                // CSRF token ekle
-                string csrfToken = GetCsrfToken(cookies);
-                if (!string.IsNullOrEmpty(csrfToken))
-                {
-                    commentsRequest.AddHeader("X-CSRFToken", csrfToken);
-                }
-                
+
+                // 3. Yorumları API'den al
+                var commentsEndpoint = $"{_config.ApiVersion}/media/{mediaId}/comments/";
+                var commentsClient = new RestClient($"{_config.BaseUrl}/{commentsEndpoint}");
+                var commentsRequest = CreateBaseRequest(Method.GET, cookies);
+
                 // Parametreleri ekle
                 commentsRequest.AddQueryParameter("can_support_threading", "true");
                 commentsRequest.AddQueryParameter("permalink_enabled", "false");
@@ -739,111 +476,191 @@ namespace InstagramAPI
                 {
                     commentsRequest.AddQueryParameter("min_id", after);
                 }
-                
-                // Çerezleri ekle
-                foreach (var cookie in cookies)
+
+                var commentsResponse = await commentsClient.ExecuteAsync(commentsRequest);
+                LogApiCall(commentsEndpoint, commentsResponse.StatusCode, $"API yanıtı alındı ({commentsResponse.StatusCode})");
+
+                if (commentsResponse.StatusCode != HttpStatusCode.OK)
                 {
-                    commentsRequest.AddCookie(cookie.Key, cookie.Value);
+                    throw new InstagramApiException($"Yorumlar alınamadı", commentsEndpoint, commentsResponse.StatusCode);
                 }
-                
-                Console.WriteLine("Yorumlar API'si çağrılıyor...");
-                IRestResponse commentsResponse = commentsClient.Execute(commentsRequest);
-                Thread.Sleep(rnd.Next(2000, 4000));
-                
-                if (commentsResponse.StatusCode != System.Net.HttpStatusCode.OK)
-                {
-                    Console.WriteLine($"Yorumlar API hatası: {commentsResponse.StatusCode}, Yanıt: {commentsResponse.Content}");
-                    throw new Exception($"Yorumlar alınamadı: {commentsResponse.StatusCode}");
-                }
-                
-                // 5. API yanıtını işle
+
                 try
                 {
-                    var cleanedCommentsResponse = CleanInstagramResponse(commentsResponse.Content);
-                    dynamic commentsData = JObject.Parse(cleanedCommentsResponse);
-                    
-                    // Hata kontrolü
-                    if (commentsData.status != "ok")
+                    var cleanedResponse = CleanInstagramResponse(commentsResponse.Content);
+                    dynamic data = JObject.Parse(cleanedResponse);
+
+                    if (data.status != "ok")
                     {
-                        throw new Exception("Instagram API yanıtı başarısız: " + commentsData.message);
+                        throw new InstagramApiException("Instagram API yanıtı başarısız: " + data.message);
                     }
-                    
+
                     // Yorumları işle
-                    if (commentsData.comments != null)
+                    if (data.comments != null)
                     {
-                        foreach (var commentItem in commentsData.comments)
+                        foreach (var commentItem in data.comments)
                         {
                             try
                             {
-                                var comment = new Comment();
-                                comment.Id = commentItem.pk;
-                                comment.Text = commentItem.text;
-                                comment.Date = Tools.UnixTimeStampToDateTime((double)commentItem.created_at);
-                                comment.OwnerName = commentItem.user.username;
-                                comment.OwnerPicture = commentItem.user.profile_pic_url;
-                                comments.Add(comment);
+                                comments.Add(new Comment
+                                {
+                                    Id = commentItem.pk,
+                                    Text = commentItem.text,
+                                    Date = Tools.UnixTimeStampToDateTime((double)commentItem.created_at),
+                                    OwnerName = commentItem.user.username,
+                                    OwnerPicture = commentItem.user.profile_pic_url
+                                });
                             }
-                            catch { /* Hatalı yorumu atla */ }
+                            catch (Exception ex)
+                            {
+                                _logger.LogDebug($"Yorum dönüştürme hatası: {ex.Message}");
+                            }
                         }
                     }
-                    
-                    // Hiç yorum bulamazsak
+
+                    // Hiç yorum bulunamazsa
                     if (comments.Count == 0)
                     {
-                        var sysComment = new Comment();
-                        sysComment.Id = "info_" + DateTime.Now.Ticks;
-                        sysComment.Text = "Bu gönderide henüz hiç yorum yok veya yorumlar gizlenmiş olabilir.";
-                        sysComment.Date = DateTime.Now;
-                        sysComment.OwnerName = "system_info";
-                        sysComment.OwnerPicture = "https://instagram.com/favicon.ico";
-                        comments.Add(sysComment);
+                        comments.Add(new Comment
+                        {
+                            Id = "info_" + DateTime.Now.Ticks,
+                            Text = "Bu gönderide henüz hiç yorum yok veya yorumlar gizlenmiş olabilir.",
+                            Date = DateTime.Now,
+                            OwnerName = "system_info",
+                            OwnerPicture = "https://instagram.com/favicon.ico"
+                        });
                     }
-                    
-                    // 6. Sayfalama varsa devam
-                    bool hasNextPage = commentsData.has_more_comments == true;
-                    string nextCursor = commentsData.next_min_id?.ToString();
-                    
+
+                    // Sayfalama kontrolü
+                    bool hasNextPage = data.has_more_comments == true;
+                    string nextCursor = data.next_min_id?.ToString();
+
                     if (hasNextPage && !string.IsNullOrEmpty(nextCursor) && pageCount > 1)
                     {
-                        var nextComments = GetComments(shortcode, cookies, postPerPage: postPerPage, pageCount: --pageCount, after: nextCursor);
+                        _logger.LogInfo($"Sonraki sayfa yükleniyor. Cursor: {nextCursor}");
+                        var nextComments = await GetCommentsAsync(shortcode, cookies, nextCursor, postPerPage, --pageCount);
                         comments.AddRange(nextComments);
                     }
+
+                    _logger.LogInfo($"Toplam {comments.Count} yorum bulundu");
+                    return comments;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("Yorumlar API yanıtı işlenirken hata: " + ex.Message);
-                    
-                    // API yanıtı işlenemezse, HTML'den çıkardığımız yorumları döndürelim
-                    if (comments.Count == 0)
+                    _logger.LogError("Yorumlar işlenirken hata", ex);
+                    throw new InstagramApiException("Instagram yorumlar API yanıtı işlenemedi", ex);
+                }
+            }, "GetComments");
+        }
+
+        private async Task<string> ExtractMediaIdAsync(string content)
+        {
+            try
+            {
+                // 1. Düzenli ifade ile dene
+                var mediaIdMatch = Regex.Match(content, @"""media_id"":""(\d+)""");
+                if (mediaIdMatch.Success)
+                {
+                    _logger.LogDebug($"Media ID düzenli ifade ile bulundu: {mediaIdMatch.Groups[1].Value}");
+                    return mediaIdMatch.Groups[1].Value;
+                }
+
+                // 2. SharedData'dan dene
+                var sharedDataMatch = Regex.Match(content, @"window\._sharedData\s*=\s*({.+?});</script>");
+                if (sharedDataMatch.Success)
+                {
+                    dynamic sharedData = JObject.Parse(sharedDataMatch.Groups[1].Value);
+                    var mediaId = sharedData.entry_data?.PostPage[0]?.graphql?.shortcode_media?.id;
+                    if (!string.IsNullOrEmpty(mediaId?.ToString()))
                     {
-                        var sysComment = new Comment();
-                        sysComment.Id = "error_" + DateTime.Now.Ticks;
-                        sysComment.Text = "Yorumlar alınırken bir hata oluştu: " + ex.Message;
-                        sysComment.Date = DateTime.Now;
-                        sysComment.OwnerName = "system_error";
-                        sysComment.OwnerPicture = "https://instagram.com/favicon.ico";
-                        comments.Add(sysComment);
+                        _logger.LogDebug($"Media ID SharedData'dan bulundu: {mediaId}");
+                        return mediaId.ToString();
                     }
                 }
-                
-                Console.WriteLine($"Toplam {comments.Count} yorum bulundu");
-                return comments;
+
+                // 3. AppData'dan dene
+                var appDataMatch = Regex.Match(content, @"<script type=""application/json"" data-sj>(.*?)</script>");
+                if (appDataMatch.Success)
+                {
+                    dynamic appData = JObject.Parse(appDataMatch.Groups[1].Value);
+                    var mediaId = appData.items?[0]?.id;
+                    if (!string.IsNullOrEmpty(mediaId?.ToString()))
+                    {
+                        _logger.LogDebug($"Media ID AppData'dan bulundu: {mediaId}");
+                        return mediaId.ToString();
+                    }
+                }
+
+                return null;
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Yorumlar işlenirken hata: " + ex.Message);
-                
-                // Hata durumunda bilgilendirme yorumu ekle
-                var errorComment = new Comment();
-                errorComment.Id = "error_" + DateTime.Now.Ticks;
-                errorComment.Text = "Yorumlar alınırken bir hata oluştu: " + ex.Message;
-                errorComment.Date = DateTime.Now;
-                errorComment.OwnerName = "system_error";
-                errorComment.OwnerPicture = "https://instagram.com/favicon.ico";
-                comments.Add(errorComment);
-                
-                return comments;
+                _logger.LogWarning($"Media ID çıkarılırken hata: {ex.Message}");
+                return null;
             }
+        }
+
+        private async Task<List<Comment>> ExtractCommentsFromHtmlAsync(string content)
+        {
+            var comments = new List<Comment>();
+
+            try
+            {
+                var commentDataMatches = Regex.Matches(content, @"""text"":""([^""\\]*(?:\\.[^""\\]*)*)"",""created_at"":(\d+\.?\d*),""owner"":{""id"":""(\d+)"",""profile_pic_url"":""([^""]+)"",""username"":""([^""]+)""}");
+
+                foreach (Match match in commentDataMatches)
+                {
+                    try
+                    {
+                        var commentText = Regex.Unescape(match.Groups[1].Value);
+                        var createdAt = double.Parse(match.Groups[2].Value);
+                        var ownerId = match.Groups[3].Value;
+                        var ownerPic = match.Groups[4].Value;
+                        var ownerName = match.Groups[5].Value;
+
+                        comments.Add(new Comment
+                        {
+                            Id = $"{ownerId}_{createdAt}",
+                            Text = commentText,
+                            Date = Tools.UnixTimeStampToDateTime(createdAt),
+                            OwnerName = ownerName,
+                            OwnerPicture = ownerPic
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug($"HTML yorum dönüştürme hatası: {ex.Message}");
+                    }
+                }
+
+                if (comments.Count == 0)
+                {
+                    comments.Add(new Comment
+                    {
+                        Id = "info_" + DateTime.Now.Ticks,
+                        Text = "Bu gönderiye ait yorum bulunamadı veya yorumlar kısıtlanmış durumda.",
+                        Date = DateTime.Now,
+                        OwnerName = "system_info",
+                        OwnerPicture = "https://instagram.com/favicon.ico"
+                    });
+                }
+
+                _logger.LogInfo($"{comments.Count} yorum HTML içeriğinden çıkarıldı");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("HTML'den yorumlar çıkarılırken hata", ex);
+                comments.Add(new Comment
+                {
+                    Id = "error_" + DateTime.Now.Ticks,
+                    Text = "Yorumlar alınırken bir hata oluştu: " + ex.Message,
+                    Date = DateTime.Now,
+                    OwnerName = "system_error",
+                    OwnerPicture = "https://instagram.com/favicon.ico"
+                });
+            }
+
+            return comments;
         }
     }
 }

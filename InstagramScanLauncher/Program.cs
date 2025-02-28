@@ -18,7 +18,7 @@ namespace InstagramScanLauncher
         private static InstagramAPI.Functions _instagramFunc;
         private static readonly string LogFilePath = "instagram_scanner.log";
         
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             AppDomain.CurrentDomain.UnhandledException += (sender, e) => 
             {
@@ -39,7 +39,7 @@ namespace InstagramScanLauncher
                 InitializeSession();
                 
                 // Ana programı çalıştır
-                RunMainMenu();
+                await RunMainMenu();
             }
             catch (Exception ex)
             {
@@ -159,7 +159,7 @@ namespace InstagramScanLauncher
         /// <summary>
         /// Ana menüyü çalıştırır ve kullanıcı arayüzünü gösterir
         /// </summary>
-        static void RunMainMenu()
+        static async Task RunMainMenu()
         {
             bool exit = false;
             
@@ -186,16 +186,16 @@ namespace InstagramScanLauncher
                     switch (choice)
                     {
                         case "1":
-                            ShowUserInfo();
+                            await ShowUserInfo();
                             break;
                         case "2":
-                            ShowUserPosts();
+                            await ShowUserPosts();
                             break;
                         case "3":
-                            SearchHashtag();
+                            await SearchHashtag();
                             break;
                         case "4":
-                            ShowPostComments();
+                            await ShowPostComments();
                             break;
                         case "5":
                             ShowLogFile();
@@ -271,7 +271,7 @@ namespace InstagramScanLauncher
         /// <summary>
         /// Kullanıcı bilgilerini gösterir
         /// </summary>
-        static void ShowUserInfo()
+        static async Task ShowUserInfo()
         {
             try
             {
@@ -288,7 +288,7 @@ namespace InstagramScanLauncher
                 WriteLog($"Kullanıcı bilgileri isteniyor: {username}");
                 Console.WriteLine($"\n{username} kullanıcısı için bilgiler getiriliyor...");
                 
-                var user = _instagramFunc.GetUser(username, _cookies);
+                var user = await _instagramFunc.GetUserAsync(username, _cookies);
                 
                 if (user != null)
                 {
@@ -317,7 +317,7 @@ namespace InstagramScanLauncher
         /// <summary>
         /// Kullanıcının paylaşımlarını gösterir
         /// </summary>
-        static void ShowUserPosts()
+        static async Task ShowUserPosts()
         {
             try
             {
@@ -334,7 +334,7 @@ namespace InstagramScanLauncher
                 WriteLog($"Kullanıcı postları isteniyor: {username}");
                 Console.WriteLine($"\n{username} kullanıcısı için bilgiler getiriliyor...");
                 
-                var user = _instagramFunc.GetUser(username, _cookies);
+                var user = await _instagramFunc.GetUserAsync(username, _cookies);
                 
                 Console.Write("Kaç sayfa gönderi istiyorsunuz? (Default: 1): ");
                 if (!int.TryParse(Console.ReadLine(), out int pageCount) || pageCount < 1)
@@ -345,7 +345,7 @@ namespace InstagramScanLauncher
                 WriteLog($"{username} kullanıcısı için {pageCount} sayfa post isteniyor");
                 Console.WriteLine($"\n{username} kullanıcısının gönderileri getiriliyor...");
                 
-                var posts = _instagramFunc.GetPostsFromUserId(user.Id, _cookies, pageCount: pageCount);
+                var posts = await _instagramFunc.GetPostsFromUserIdAsync(user.Id, _cookies, pageCount: pageCount);
                 
                 if (posts != null && posts.Any())
                 {
@@ -381,7 +381,7 @@ namespace InstagramScanLauncher
         /// <summary>
         /// Hashtag ile ilgili postları gösterir
         /// </summary>
-        static void SearchHashtag()
+        static async Task SearchHashtag()
         {
             try
             {
@@ -404,7 +404,7 @@ namespace InstagramScanLauncher
                 WriteLog($"#{tag} hashtagi için {postCount} post isteniyor");
                 Console.WriteLine($"\n#{tag} hashtagi ile ilgili postlar getiriliyor...");
                 
-                var posts = _instagramFunc.GetPostsFromTag(tag, _cookies, postPerPage: postCount);
+                var posts = await _instagramFunc.GetPostsFromTagAsync(tag, _cookies, postPerPage: postCount);
                 
                 if (posts != null && posts.Any())
                 {
@@ -440,7 +440,7 @@ namespace InstagramScanLauncher
         /// <summary>
         /// Bir gönderinin yorumlarını gösterir
         /// </summary>
-        static void ShowPostComments()
+        static async Task ShowPostComments()
         {
             try
             {
@@ -469,7 +469,7 @@ namespace InstagramScanLauncher
                 WriteLog($"Post yorumları isteniyor: {shortcode}");
                 Console.WriteLine($"\nPost yorumları getiriliyor: {shortcode}");
                 
-                var comments = _instagramFunc.GetComments(shortcode, _cookies);
+                var comments = await _instagramFunc.GetCommentsAsync(shortcode, _cookies);
                 
                 if (comments != null && comments.Any())
                 {
